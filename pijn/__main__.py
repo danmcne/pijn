@@ -60,7 +60,12 @@ def _cmd_publish(args):
     gw = policy.gateway
     print(f"published {summary['files']} file(s) as kind {summary['kind']}")
     print(f"manifest: {summary['manifest_id']}")
-    print(f"browse:   http://{gw.host}:{gw.port}{site}")
+    if summary["identifier"]:
+        print(f"browse:   http://{gw.host}:{gw.port}{site}")
+    else:
+        # Subdomain origin: root-absolute links (href="/style.css") resolve.
+        print(f"browse:   http://{summary['npub']}.localhost:{gw.port}/")
+        print(f"      or: http://{gw.host}:{gw.port}{site}")
 
 
 def main(argv=None):

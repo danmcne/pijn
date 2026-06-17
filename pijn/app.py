@@ -54,7 +54,9 @@ def build_node(policy: Policy, only: str | None = None) -> Node:
     if wanted("blob_store", bs.enabled):
         node.blob_store = BlobStore(bs.path)
         node.apps["blob_store"] = (
-            build_blob_app(node.blob_store, policy.blossom_public_url), bs.host, bs.port,
+            build_blob_app(node.blob_store, policy.blossom_public_url,
+                           max_size=policy.blob_max_size),
+            bs.host, bs.port,
         )
 
     if wanted("gateway", gw.enabled):

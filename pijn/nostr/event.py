@@ -11,6 +11,7 @@ event-store needs to decide how to persist it.
 
 import hashlib
 import json
+import os
 import time
 from dataclasses import dataclass, field
 
@@ -84,7 +85,11 @@ class Event:
         signature. Mutates and returns self."""
         self.pubkey = pubkey_from_seckey(seckey_bytes).hex()
         self.id = self.compute_id()
-        self.sig = schnorr_sign(bytes.fromhex(self.id), seckey_bytes).hex()
+        # Fresh aux_rand per BIP-340 (the spec's recommended default); the nonce
+        # already binds the secret key + id, so this only adds fault/side-channel
+        # hardening. schnorr_sign keeps a zero default so the test vectors still
+        # reproduce.
+        self.sig = schnorr_sign(bytes.fromhex(self.id), seckey_bytes, os.urandom(32)).hex()
         return self
 
     def verify(self) -> bool:

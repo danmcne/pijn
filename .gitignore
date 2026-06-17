@@ -1,0 +1,9 @@
+# runtime state — never commit
+.pijn/
+*.sqlite
+*.sqlite-*
+blobs/
+policy.yaml
+*.log
+__pycache__/
+*.pyc

@@ -33,13 +33,25 @@ def _guess_type(stored_type: str, sha_with_ext: str) -> str:
     return guessed or "application/octet-stream"
 
 
-def build_blob_app(store: BlobStore, public_url: str = "") -> FastAPI:
+def build_blob_app(store: BlobStore, public_url: str = "", max_size: int = 0) -> FastAPI:
     app = FastAPI(title="pijn blossom")
     app.state.store = store
 
     @app.put("/upload")
     async def upload(request: Request, authorization: str = Header(default="")):
+        # Reject oversized uploads before buffering the whole body, when the
+        # client declares a length; the post-read check below is the backstop.
+        if max_size:
+            declared = request.headers.get("content-length")
+            if declared and declared.isdigit() and int(declared) > max_size:
+                return JSONResponse(
+                    {"message": f"blob exceeds max size {max_size}"}, status_code=413
+                )
         data = await request.body()
+        if max_size and len(data) > max_size:
+            return JSONResponse(
+                {"message": f"blob exceeds max size {max_size}"}, status_code=413
+            )
         sha = sha256_hex(data)
         pubkey = verify_auth(authorization, "upload", sha)
         if pubkey is None:

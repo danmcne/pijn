@@ -45,6 +45,18 @@ def _parse_listen(value: str) -> tuple[str, int]:
     return host or "127.0.0.1", int(port)
 
 
+_SIZE_UNITS = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
+
+
+def parse_size(value) -> int:
+    """Parse a human size like '100MB' / '20GB' into bytes. Bare ints pass through."""
+    s = str(value).strip().upper()
+    for unit in ("KB", "MB", "GB", "TB", "B"):  # multi-char first
+        if s.endswith(unit):
+            return int(float(s[: -len(unit)]) * _SIZE_UNITS[unit])
+    return int(s)
+
+
 @dataclass
 class Policy:
     nsec_file: str = "./.pijn/nsec"
@@ -78,6 +90,12 @@ class Policy:
     def relay_public_url(self) -> str:
         es = self.event_store
         return f"ws://{es.host}:{es.port}"
+
+    @property
+    def blob_max_size(self) -> int:
+        """Max accepted blob size in bytes (limits.blob_max_size; default 100MB)."""
+        raw = (self.raw.get("limits") or {}).get("blob_max_size", "100MB")
+        return parse_size(raw)
 
     # --- key loading (never from the policy file) ---
     def load_keypair(self) -> Keypair:

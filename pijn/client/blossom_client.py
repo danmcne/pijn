@@ -48,4 +48,14 @@ class BlossomClient:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(f"{self.base_url}/{sha}")
             resp.raise_for_status()
-            return resp.content
+            data = resp.content
+        # Content-addressed integrity: a blob is only trustworthy if its bytes
+        # hash to the name we asked for. Without this check, a malicious or
+        # buggy Blossom server could serve arbitrary bytes for any hash — the
+        # exact failure the "any server is interchangeable" model assumes away.
+        if sha256_hex(data) != sha:
+            raise ValueError(
+                f"blob hash mismatch from {self.base_url}: requested {sha}, "
+                f"got {sha256_hex(data)}"
+            )
+        return data

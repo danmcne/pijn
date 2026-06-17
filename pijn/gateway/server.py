@@ -22,14 +22,41 @@ _LANDING = """<!doctype html><meta charset=utf-8>
 <body style="font-family:system-ui;max-width:40rem;margin:3rem auto;padding:0 1rem">
 <h1>pijn gateway</h1>
 <p>This node renders sites owned by Nostr identities.</p>
-<p>Open a root site at <code>/n/&lt;npub&gt;/</code> or a named site at
-<code>/s/&lt;npub&gt;/&lt;identifier&gt;/</code>.</p>
+<p>Open a root site at <code>http://&lt;npub&gt;.localhost:4850/</code> (recommended —
+relative <em>and</em> root-absolute links work), or via the path scheme at
+<code>/n/&lt;npub&gt;/</code>. Named sites: <code>/s/&lt;npub&gt;/&lt;identifier&gt;/</code>.</p>
 </body>"""
 
 
 def build_gateway_app(resolver) -> FastAPI:
     app = FastAPI(title="pijn gateway")
     app.state.resolver = resolver
+
+    @app.middleware("http")
+    async def subdomain_router(request: Request, call_next):
+        """Serve `http://<npub>.<host>/<path>` as that pubkey's ROOT site.
+
+        Path-prefixed routes (`/n/<npub>/…`) can't carry root-absolute links
+        like `<link href="/style.css">`, because the browser requests them at
+        the gateway root with no npub to attribute them to. Giving each site its
+        own origin via a subdomain (e.g. `<npub>.localhost:4850`, which browsers
+        resolve to 127.0.0.1 with no setup) fixes that: every request under that
+        host belongs to one site, so absolute paths just work. Named sites still
+        use the `/s/…` path scheme until P2 extends this to `<id>.<npub>.<host>`.
+        """
+        host = request.headers.get("host", "").split(":")[0]
+        label = host.split(".")[0] if "." in host else ""
+        if label and (label.startswith("npub1") or len(label) == 64):
+            try:
+                pubkey = normalize_pubkey(label)
+            except ValueError:
+                return await call_next(request)
+            result = await resolver.resolve(pubkey, request.url.path, "")
+            if result is None:
+                return Response("not found", status_code=404)
+            data, content_type = result
+            return Response(content=data, media_type=content_type)
+        return await call_next(request)
 
     @app.get("/", response_class=HTMLResponse)
     async def landing():

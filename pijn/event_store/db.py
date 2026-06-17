@@ -96,8 +96,13 @@ class EventStore:
                         (event.pubkey, event.kind, event.d_tag),
                     ).fetchall()
                 for row in rows:
-                    # Keep the newer event; tie-break on smallest id.
-                    if (row["created_at"], row["id"]) >= (event.created_at, event.id):
+                    # Keep the newer event; on a created_at tie, NIP-01 retains
+                    # the lexicographically *smallest* id. So the incoming event
+                    # is superseded iff an existing one is strictly newer, or is
+                    # equally old with a smaller id.
+                    if row["created_at"] > event.created_at or (
+                        row["created_at"] == event.created_at and row["id"] < event.id
+                    ):
                         return True, "superseded"
                 # Incoming event wins: drop the older ones.
                 for row in rows:
