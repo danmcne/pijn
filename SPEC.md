@@ -247,3 +247,34 @@ of P7 (once it routes value to seeders/hosts).
 Sign-off on: (1) the layer pin table in §1 including deltas D1–D3, (2) the four
 service boundaries in §2, (3) the event-vs-blob model in §3, (4) the YAML schema
 in §4. Once signed, P1 (node skeleton) may begin.
+
+---
+
+## 7. Naming & discovery — names are claims, npubs are facts
+
+The hard problem under discovery is naming, and it is a fixed tradeoff (Zooko's
+triangle): a name can be at most two of memorable, decentralized, and
+impersonation-proof at once. pijn's choice:
+
+- **The npub is the only canonical identity.** It is self-certifying (the key
+  *is* the name), so it is the one thing that cannot be forged or collided. All
+  internal references, storage keys, and links use the npub/hex pubkey.
+- **NIP-05 primes the pump.** A `name@domain` lets a domain *vouch* that a name
+  maps to a pubkey (`nostr/nip05.py`). It is domain-scoped, not global, and only
+  as trustworthy as the domain — exactly the email model. It is verification of
+  a claim, never proof of trustworthiness.
+- **A simple web of trust does the ranking.** Trust is seeded by (a) verified
+  NIP-05 and (b) the `relays.trusted` set in policy, whose stored follow-graphs
+  (kind 3 / NIP-65) and vouches bootstrap a graph. Names are then ranked by
+  proximity to the searcher's own graph, not by claimed display name. Two people
+  may both claim "Alice"; the fake one simply never accrues graph endorsements
+  and never ranks. (Engine is P6; the `trusted` field is parsed inert from P1.)
+- **Always show the digest.** Every surface that renders a claimed name MUST
+  show a short, key-derived npub digest beside it (`nostr/display.py`
+  `short_npub` / `name_badge`), so two "Alice"s are distinguishable and a swapped
+  identity is visible at a glance. A name is never shown on its own. NIP-05 gets
+  a ✓ only after `verify_nip05` succeeds; an unverified claim shows `?`.
+
+Consequence: impersonation is *not* prevented (anyone can mint an npub and type
+any display name) but is made to not *stick* — it carries no domain vouch and no
+graph weight. This is a polycentric, reputation-based order, not a registrar.

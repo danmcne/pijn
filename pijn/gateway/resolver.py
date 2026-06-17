@@ -19,8 +19,10 @@ The resolver itself owns no state — it is a pure projection of events + blobs.
 
 import mimetypes
 
+from . import blog as blog_render
 from ..nostr.nsite import (
     KIND_LEGACY,
+    KIND_LONGFORM,
     KIND_NAMED,
     KIND_ROOT,
     normalize_request_path,
@@ -46,6 +48,10 @@ class LocalEventSource:
         events = self.store.query(filters)
         return events[0] if events else None
 
+    def get_posts(self, pubkey: str):
+        """All of a pubkey's kind-30023 long-form posts (newest first)."""
+        return self.store.query([{"authors": [pubkey], "kinds": [KIND_LONGFORM]}])
+
 
 class RelayEventSource:
     """Read manifests from one or more remote relays (WebSocket)."""
@@ -69,6 +75,20 @@ class RelayEventSource:
             except Exception:
                 continue
         return newest
+
+    async def get_posts(self, pubkey: str):
+        from ..client.relay_client import RelayClient
+        filters = [{"authors": [pubkey], "kinds": [KIND_LONGFORM]}]
+        seen, posts = set(), []
+        for url in self.relay_urls:
+            try:
+                for ev in await RelayClient(url).query(filters):
+                    if ev.id not in seen:
+                        seen.add(ev.id)
+                        posts.append(ev)
+            except Exception:
+                continue
+        return posts
 
 
 # --- blob sources ------------------------------------------------------------
@@ -119,6 +139,10 @@ class Resolver:
             return None
 
         manifest = parse_manifest(event)
+
+        if manifest.get("app") == "blog":
+            return await self._resolve_blog(pubkey, request_path, manifest)
+
         sha = resolve_blob(manifest, request_path)
         if sha is None:
             return None
@@ -132,3 +156,20 @@ class Resolver:
 
         content_type, _ = mimetypes.guess_type(normalize_request_path(request_path))
         return data, content_type or "application/octet-stream"
+
+    async def _resolve_blog(self, pubkey: str, request_path: str, manifest: dict):
+        """Project the pubkey's kind-30023 posts into an index + post pages."""
+        if self.is_async:
+            posts = await self.event_source.get_posts(pubkey)
+        else:
+            posts = self.event_source.get_posts(pubkey)
+
+        path = request_path.split("?", 1)[0].strip("/")
+        if path in ("", "index.html"):
+            return blog_render.render_index(manifest, pubkey, posts), "text/html; charset=utf-8"
+
+        # Otherwise the path is a post slug (the post's `d` tag).
+        for post in posts:
+            if post.d_tag == path:
+                return blog_render.render_post(manifest, pubkey, post), "text/html; charset=utf-8"
+        return None

@@ -4,6 +4,96 @@ All notable changes to pijn are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project versions by
 roadmap phase (see [`roadmap.md`](./roadmap.md)).
 
+## [0.2.1] — P2: blog template (kind 30023) — P2 exit met
+
+Adds long-form blogging as a *projection*: posts are kind-30023 events (readable
+by any NIP-23 client), and the gateway renders them to a site on the fly. This
+meets the P2 exit — a non-trivial site, editable in place, visible to a vanilla
+Nostr client.
+
+### Added
+- **Blog projection** (`gateway/blog.py`, `gateway/resolver.py`): an nsite
+  manifest tagged `app=blog` marks an origin as a blog; the resolver then queries
+  the owner's kind-30023 events and renders an index (`/`) plus per-post pages
+  (`/<slug>`) instead of serving blobs. Byline always shows the npub digest.
+- **Markdown renderer** (`gateway/markdown.py`): small, vendored, pure-Python
+  CommonMark subset. All text is HTML-escaped and URLs are sanitized
+  (`javascript:`/`data:` neutralized) — the gateway renders untrusted authors'
+  Markdown, and per-site origins contain the rest.
+- **Authoring** (`post.py`): `pijn post <file.md>` publishes/updates a kind-30023
+  post (slug = `d` tag; re-posting supersedes); `pijn blog` publishes the
+  `app=blog` manifest. `pijn init --template blog` scaffolds a sample post.
+
+### Notes
+- A blog is, for now, *all* of the author's kind-30023 posts. Curated/multiple
+  blogs (via NIP-51 sets or `a`-tag references) are a later refinement.
+- `published_at` is set to now on each publish; preserving the original across
+  edits is a small follow-up.
+
+## [0.2.0] — P2 (in progress): per-site origins + templated publishing
+
+Begins P2 (author → publish → update from a template). The gateway naming model
+is finished and the publishing path is real; the blog (kind 30023) template is
+the next slice.
+
+### Added
+- **Named-site origins** (`gateway/server.py`): each site now has its own
+  origin — `http://<npub>.<host>/` for a root site, `http://<id>.<npub>.<host>/`
+  for a named site — so a site's root-absolute links (`/style.css`) resolve to
+  that site. The pubkey may be the first or second host label, so it works under
+  `*.localhost` and a multi-label clearweb domain alike.
+- **Templated publisher** (`publish.py`): uploads now carry a detected
+  content-type (so vanilla Blossom clients and njump serve blobs correctly), and
+  `publish --server <url>` can target an external Blossom host. Re-publishing is
+  the mutable-update path: a fresh manifest with a newer `created_at` supersedes
+  the old one — no blob is mutated.
+- **`init` command + `static` template** (`templates.py`): `pijn init <dir>`
+  scaffolds a clean, build-step-free starter site (relative links, dark-mode
+  aware) the author edits and publishes. More templates follow.
+
+### Changed
+- **Legacy path routes now redirect** (`gateway/server.py`): `/n/<npub>/…` and
+  `/s/<npub>/<id>/…` issue a 307 to the canonical per-site origin instead of
+  rendering, so an old or hand-typed link lands on the working URL rather than a
+  half-broken one (the path scheme could never carry root-absolute assets).
+- `publish` prints the canonical subdomain URL for both root and named sites.
+
+## [0.1.2] — P1 hardening + naming primitives
+
+Post-review hardening of the P1 skeleton, plus the first naming pieces (the
+NIP-05 + web-of-trust direction agreed for discovery; engine itself is P6).
+
+### Fixed
+- **NIP-01 replaceable/addressable tie-break** (`event_store/db.py`): on equal
+  `created_at` the lexicographically *smallest* id is now retained, per NIP-01.
+  Previously the larger id won.
+- **Blob integrity on fetch** (`client/blossom_client.py`): a fetched blob is
+  now re-hashed and rejected on mismatch, so a lying/buggy Blossom server can't
+  serve arbitrary bytes for a hash (the assumption the mirror model relies on).
+- **Client hang protection** (`client/relay_client.py`): `publish`/`query` take
+  a timeout and terminate on `CLOSED`/`NOTICE`; no more indefinite hangs.
+- **`blob_max_size` enforced** (`policy.py`, `app.py`, `blob_store/server.py`):
+  oversized uploads are rejected with 413 (Content-Length pre-check + post-read
+  backstop). Added a `parse_size` helper for human sizes (`100MB`, `20GB`).
+- **BIP-340 signing** (`nostr/event.py`): `Event.sign` now uses fresh `aux_rand`
+  for side-channel hardening; `schnorr_sign` keeps a zero default so the test
+  vectors still reproduce.
+
+### Added
+- **Gateway subdomain origin** (`gateway/server.py`): a Host-header router serves
+  `http://<npub>.<host>/…` as that pubkey's root site, giving each site its own
+  origin so root-absolute links (`/style.css`) resolve. Path routes
+  (`/n/…`, `/s/…`) are unchanged. `publish` prints the subdomain URL for root
+  sites. This is the model the clearweb gateway (P5) will reuse.
+- **NIP-05** (`nostr/nip05.py`): resolve `name@domain` → pubkey (+ outbox relay
+  hints), and `verify_nip05` to confirm a domain's vouch. No HTTP redirects.
+- **Name display** (`nostr/display.py`): `short_npub` (key-derived digest) and
+  `name_badge`, enforcing the rule that a claimed name is always shown beside
+  the unfakeable npub digest.
+- **`whois` CLI**: resolve a NIP-05 or show an npub digest, the way a UI would.
+- **`relays.trusted`** policy field (parsed inert) — seeds the future web of
+  trust. **SPEC §7** records the naming/discovery model.
+
 ## [0.1.0] — P1: node skeleton
 
 The first running code. Three separable services plus the tooling to publish and

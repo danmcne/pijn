@@ -11,6 +11,7 @@ the *real* wire interfaces (Blossom HTTP + relay WebSocket), so what it produces
 is readable by any vanilla Nostr/Blossom client.
 """
 
+import mimetypes
 import os
 
 from .client.blossom_client import BlossomClient
@@ -40,7 +41,11 @@ async def publish_site(directory: str, keypair: Keypair, blossom_url: str,
     for request_path, fs_path in _iter_files(directory):
         with open(fs_path, "rb") as f:
             data = f.read()
-        descriptor = await blossom.upload(data, keypair)
+        # Tag the blob with a real content-type so a vanilla Blossom client (or
+        # njump in P5) serves it correctly; the gateway re-guesses from the path
+        # too, but the stored type is what interop relies on.
+        content_type = mimetypes.guess_type(fs_path)[0] or "application/octet-stream"
+        descriptor = await blossom.upload(data, keypair, content_type=content_type)
         paths[request_path] = descriptor["sha256"]
 
     if not paths:

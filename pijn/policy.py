@@ -64,6 +64,7 @@ class Policy:
     services: dict = field(default_factory=dict)
     relays_read: list = field(default_factory=list)
     relays_write: list = field(default_factory=list)
+    relays_trusted: list = field(default_factory=list)
     blossom_servers: list = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
@@ -140,6 +141,7 @@ def load_policy(path: str | None) -> Policy:
         services=_build_services(raw.get("services", {}) or {}),
         relays_read=relays.get("read", []),
         relays_write=relays.get("write", []),
+        relays_trusted=relays.get("trusted", []),
         blossom_servers=blossom.get("servers", []),
         raw=raw,
     )

@@ -4,7 +4,12 @@
 choose how much of the network they support, and a "website" is just one way of
 rendering that content.** Built *on* Nostr, not beside it.
 
-> **Status:** P1 — node skeleton running. The three core services (relay,
+> **Status:** P2 (v0.2.1) — P2 exit met. Each site is served from its own origin
+> (`<npub>.<host>` / `<id>.<npub>.<host>`); a templated publisher (`init` /
+> `publish`) ships a `static` starter; and a **blog** projects kind-30023
+> long-form posts (`post` / `blog`) into a rendered site that any NIP-23 client
+> can also read. Naming primitives (NIP-05 + npub digest) landed in v0.1.2.
+> The three core services (relay,
 > Blossom blob-store, gateway) build and run, and you can publish a static site
 > and browse it locally. See [`SPEC.md`](./SPEC.md) for the frozen architecture,
 > [`roadmap.md`](./roadmap.md) for the full plan, and [`CHANGELOG.md`](./CHANGELOG.md)

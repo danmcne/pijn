@@ -1,94 +1,119 @@
 """
 Local gateway / renderer.
 
-Serves resolved sites to a normal browser at `localhost`:
+Each site is served from its own *origin* (subdomain), so that a site's
+root-absolute links (`<link href="/style.css">`) resolve to that site and
+nothing else:
 
-    GET /n/<npub>/<path...>              a pubkey's ROOT site
-    GET /s/<npub>/<identifier>/<path...> a pubkey's NAMED site
-    GET /                                a tiny landing page
+    http://<npub>.<host>/<path...>              a pubkey's ROOT site
+    http://<identifier>.<npub>.<host>/<path...>  a pubkey's NAMED site
 
-`<npub>` may be a bech32 npub or a 64-char hex pubkey. The gateway holds no
-state; it just drives the resolver. This is the piece that satisfies the P1
-exit: publish your own static site and browse it locally in Firefox.
+Why subdomains and not a path prefix: under `/n/<npub>/…` the browser requests
+`/style.css` at the gateway root, with no npub attached, so the gateway can't
+tell which site it belongs to — the page renders unstyled and absolute links
+404. An origin per site removes the ambiguity. Browsers resolve `*.localhost`
+to 127.0.0.1 with no setup, so this works out of the box locally and maps
+straight onto a wildcard clearweb domain in P5.
+
+The legacy path routes (`/n/…`, `/s/…`) are kept only as redirectors to the
+canonical subdomain, so an old or hand-typed link still lands on the working
+URL. The gateway holds no state; it just drives the resolver.
+
+`<npub>` may be a bech32 npub or 64-char hex pubkey, but note a 64-char hex
+pubkey exceeds the 63-char DNS label limit — the canonical subdomain always uses
+the npub form, which fits exactly.
 """
 
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
-from ..nostr.bech32 import normalize_pubkey
+from ..nostr.bech32 import normalize_pubkey, to_npub
 
 _LANDING = """<!doctype html><meta charset=utf-8>
 <title>pijn gateway</title>
 <body style="font-family:system-ui;max-width:40rem;margin:3rem auto;padding:0 1rem">
 <h1>pijn gateway</h1>
 <p>This node renders sites owned by Nostr identities.</p>
-<p>Open a root site at <code>http://&lt;npub&gt;.localhost:4850/</code> (recommended —
-relative <em>and</em> root-absolute links work), or via the path scheme at
-<code>/n/&lt;npub&gt;/</code>. Named sites: <code>/s/&lt;npub&gt;/&lt;identifier&gt;/</code>.</p>
+<p>Open a root site at <code>http://&lt;npub&gt;.localhost:4850/</code>, or a named
+site at <code>http://&lt;identifier&gt;.&lt;npub&gt;.localhost:4850/</code>. Both
+relative and root-absolute links work, because each site has its own origin.</p>
+<p>The old <code>/n/&lt;npub&gt;/</code> and <code>/s/&lt;npub&gt;/&lt;id&gt;/</code>
+links still work — they redirect to the address above.</p>
 </body>"""
+
+
+def _label_pubkey(label: str):
+    """Return the hex pubkey if `label` is an npub/hex, else None."""
+    try:
+        return normalize_pubkey(label)
+    except ValueError:
+        return None
 
 
 def build_gateway_app(resolver) -> FastAPI:
     app = FastAPI(title="pijn gateway")
     app.state.resolver = resolver
 
+    async def _render(pubkey: str, path: str, identifier: str):
+        result = await resolver.resolve(pubkey, path, identifier)
+        if result is None:
+            return Response("not found", status_code=404)
+        data, content_type = result
+        return Response(content=data, media_type=content_type)
+
     @app.middleware("http")
     async def subdomain_router(request: Request, call_next):
-        """Serve `http://<npub>.<host>/<path>` as that pubkey's ROOT site.
+        """Serve `<npub>.<host>` (root) and `<id>.<npub>.<host>` (named) sites.
 
-        Path-prefixed routes (`/n/<npub>/…`) can't carry root-absolute links
-        like `<link href="/style.css">`, because the browser requests them at
-        the gateway root with no npub to attribute them to. Giving each site its
-        own origin via a subdomain (e.g. `<npub>.localhost:4850`, which browsers
-        resolve to 127.0.0.1 with no setup) fixes that: every request under that
-        host belongs to one site, so absolute paths just work. Named sites still
-        use the `/s/…` path scheme until P2 extends this to `<id>.<npub>.<host>`.
+        The pubkey may be the first label (root) or the second (named, with the
+        identifier as the first label). We don't rely on label *count*, so this
+        works under `*.localhost` and under a multi-label clearweb domain alike.
         """
-        host = request.headers.get("host", "").split(":")[0]
-        label = host.split(".")[0] if "." in host else ""
-        if label and (label.startswith("npub1") or len(label) == 64):
-            try:
-                pubkey = normalize_pubkey(label)
-            except ValueError:
-                return await call_next(request)
-            result = await resolver.resolve(pubkey, request.url.path, "")
-            if result is None:
-                return Response("not found", status_code=404)
-            data, content_type = result
-            return Response(content=data, media_type=content_type)
+        labels = request.headers.get("host", "").split(":")[0].split(".")
+        if labels:
+            pk0 = _label_pubkey(labels[0])
+            if pk0 is not None:
+                return await _render(pk0, request.url.path, "")
+            if len(labels) >= 2:
+                pk1 = _label_pubkey(labels[1])
+                if pk1 is not None:
+                    return await _render(pk1, request.url.path, labels[0])
         return await call_next(request)
 
     @app.get("/", response_class=HTMLResponse)
     async def landing():
         return _LANDING
 
-    async def _serve(npub: str, identifier: str, path: str):
-        try:
-            pubkey = normalize_pubkey(npub)
-        except ValueError:
-            return Response("invalid npub", status_code=400)
-        result = await resolver.resolve(pubkey, "/" + path, identifier)
-        if result is None:
-            return Response("not found", status_code=404)
-        data, content_type = result
-        return Response(content=data, media_type=content_type)
+    # --- legacy path scheme: redirect to the canonical per-site origin ---------
 
-    # Root site (with and without a trailing path).
+    def _redirect(npub: str, identifier: str, path: str, request: Request):
+        pubkey = _label_pubkey(npub)
+        if pubkey is None:
+            return Response("invalid npub", status_code=400)
+        name, _, port = request.headers.get("host", "").partition(":")
+        # A bare IP can't carry a subdomain; localhost's subdomains resolve to
+        # 127.0.0.1 anyway, so redirect IP hosts there instead.
+        if name and all(c.isdigit() or c == "." for c in name):
+            name = "localhost"
+        host = f"{name}:{port}" if port else name
+        sub = f"{identifier}.{to_npub(pubkey)}" if identifier else to_npub(pubkey)
+        tail = path if path.startswith("/") else "/" + path
+        return RedirectResponse(f"{request.url.scheme}://{sub}.{host}{tail}", status_code=307)
+
     @app.get("/n/{npub}")
-    async def root_index(npub: str):
-        return await _serve(npub, "", "")
+    async def root_index(npub: str, request: Request):
+        return _redirect(npub, "", "/", request)
 
     @app.get("/n/{npub}/{path:path}")
-    async def root_path(npub: str, path: str):
-        return await _serve(npub, "", path)
+    async def root_path(npub: str, path: str, request: Request):
+        return _redirect(npub, "", path, request)
 
-    # Named site.
     @app.get("/s/{npub}/{identifier}")
-    async def named_index(npub: str, identifier: str):
-        return await _serve(npub, identifier, "")
+    async def named_index(npub: str, identifier: str, request: Request):
+        return _redirect(npub, identifier, "/", request)
 
     @app.get("/s/{npub}/{identifier}/{path:path}")
-    async def named_path(npub: str, identifier: str, path: str):
-        return await _serve(npub, identifier, path)
+    async def named_path(npub: str, identifier: str, path: str, request: Request):
+        return _redirect(npub, identifier, path, request)
 
     return app

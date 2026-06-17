@@ -19,6 +19,9 @@ services:
 relays:
   read:  ["ws://127.0.0.1:4848"]
   write: ["ws://127.0.0.1:4848"]
+  # Seeds the web of trust (SPEC §7): the follow-graphs and NIP-05 vouches stored
+  # on these relays prime name ranking / anti-impersonation. Inert until P6.
+  trusted: []
 
 blossom:
   servers: ["http://127.0.0.1:4849"]

@@ -26,14 +26,24 @@ from .event import make_event
 KIND_ROOT = 15128
 KIND_NAMED = 35128
 KIND_LEGACY = 34128  # deprecated; resolver reads it, publisher never writes it
+KIND_LONGFORM = 30023  # NIP-23 long-form posts (the blog projects these)
 
 
 def build_manifest(paths: dict, servers: list, identifier: str = "",
-                   title: str = "", description: str = "", source: str = ""):
-    """Build an *unsigned* manifest event. `paths` maps abs path -> sha256 hex."""
+                   title: str = "", description: str = "", source: str = "",
+                   app: str = ""):
+    """Build an *unsigned* manifest event. `paths` maps abs path -> sha256 hex.
+
+    `app` marks a non-static site type (e.g. "blog"): the gateway then projects
+    the owner's application events instead of serving blobs. A blog manifest
+    typically carries no `path` tags. Vanilla nsite clients ignore the unknown
+    `app` tag and simply see a (path-less) manifest.
+    """
     tags = []
     if identifier:
         tags.append(["d", identifier])
+    if app:
+        tags.append(["app", app])
     if title:
         tags.append(["title", title])
     if description:
@@ -61,6 +71,7 @@ def parse_manifest(event) -> dict:
         "title": event.first_tag("title") or "",
         "description": event.first_tag("description") or "",
         "identifier": event.d_tag,
+        "app": event.first_tag("app") or "",
     }
 
 
