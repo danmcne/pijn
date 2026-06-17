@@ -1,0 +1,41 @@
+# pijn node policy — see SPEC.md §4 for the full schema.
+# P1 reads: identity, services, relays, blossom.
+# The rest (transport, limits, eviction, moderation, sites) is parsed and kept
+# for later phases (P3 replication, P4 transport) — present here so a complete
+# file loads cleanly today.
+version: 1
+
+identity:
+  # The nsec is NEVER stored here. `pijn keygen` writes it to nsec_file (chmod
+  # 600); or set PIJN_NSEC in the environment. npub is informational.
+  npub: ""
+  nsec_file: ./.pijn/nsec
+
+services:
+  event_store: { enabled: true, listen: "127.0.0.1:4848", db: "./relay.sqlite" }
+  blob_store:  { enabled: true, listen: "127.0.0.1:4849", path: "./blobs" }
+  gateway:     { enabled: true, listen: "127.0.0.1:4850" }
+
+relays:
+  read:  ["ws://127.0.0.1:4848"]
+  write: ["ws://127.0.0.1:4848"]
+
+blossom:
+  servers: ["http://127.0.0.1:4849"]
+
+# ---- consumed by later phases (parsed but inert in P1) ----
+transport:
+  default: direct
+  tor: { socks: "127.0.0.1:9050", inbound_onion: false }
+
+limits: { storage_total: 20GB, bandwidth_month: 200GB, blob_max_size: 100MB }
+
+eviction: { policy: lru, protect_pinned: true }
+
+moderation:
+  mode: opt-in
+  pubkeys: { allow: [], block: [] }
+  content: { allow: [], block: [] }
+  warn_on_override: true
+
+sites: []

@@ -1,0 +1,80 @@
+"""
+Blossom server (BUD-01 / BUD-02) over HTTP.
+
+Endpoints:
+    PUT    /upload          store a blob (auth: t=upload, x=sha256 of body)
+    GET    /<sha256>[.ext]   fetch a blob (public)
+    HEAD   /<sha256>[.ext]   existence + size (public)
+    DELETE /<sha256>         delete a blob you own (auth: t=delete, x=sha256)
+    GET    /list/<pubkey>    list a pubkey's blob descriptors (public)
+
+Reads are public; writes are authorized by a signed kind-24242 token (see
+auth.py). The server owns bytes only — never events.
+"""
+
+import mimetypes
+
+from fastapi import FastAPI, Header, Request, Response
+from fastapi.responses import JSONResponse
+
+from .auth import verify_auth
+from .storage import BlobStore, sha256_hex
+
+
+def _strip_ext(sha_with_ext: str) -> str:
+    """`<sha>.png` -> `<sha>`; leave a bare hash untouched."""
+    return sha_with_ext.split(".", 1)[0]
+
+
+def _guess_type(stored_type: str, sha_with_ext: str) -> str:
+    if stored_type:
+        return stored_type
+    guessed, _ = mimetypes.guess_type(sha_with_ext)
+    return guessed or "application/octet-stream"
+
+
+def build_blob_app(store: BlobStore, public_url: str = "") -> FastAPI:
+    app = FastAPI(title="pijn blossom")
+    app.state.store = store
+
+    @app.put("/upload")
+    async def upload(request: Request, authorization: str = Header(default="")):
+        data = await request.body()
+        sha = sha256_hex(data)
+        pubkey = verify_auth(authorization, "upload", sha)
+        if pubkey is None:
+            return JSONResponse({"message": "unauthorized"}, status_code=401)
+        descriptor = store.put(
+            data, content_type=request.headers.get("content-type", ""), pubkey=pubkey
+        )
+        descriptor["url"] = f"{public_url}/{sha}" if public_url else f"/{sha}"
+        return descriptor
+
+    @app.api_route("/list/{pubkey}", methods=["GET"])
+    async def list_blobs(pubkey: str):
+        return store.list_by_pubkey(pubkey, base_url=public_url)
+
+    @app.api_route("/{sha_with_ext}", methods=["GET", "HEAD"])
+    async def fetch(sha_with_ext: str, request: Request):
+        sha = _strip_ext(sha_with_ext)
+        meta = store.meta(sha)
+        if meta is None or not store.has(sha):
+            return Response(status_code=404)
+        media_type = _guess_type(meta["type"], sha_with_ext)
+        if request.method == "HEAD":
+            return Response(
+                status_code=200,
+                headers={"content-length": str(meta["size"]), "content-type": media_type},
+            )
+        return Response(content=store.get(sha), media_type=media_type)
+
+    @app.delete("/{sha}")
+    async def delete(sha: str, authorization: str = Header(default="")):
+        sha = _strip_ext(sha)
+        pubkey = verify_auth(authorization, "delete", sha)
+        if pubkey is None:
+            return JSONResponse({"message": "unauthorized"}, status_code=401)
+        ok, message = store.delete(sha, pubkey)
+        return JSONResponse({"message": message}, status_code=200 if ok else 403)
+
+    return app

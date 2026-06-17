@@ -1,0 +1,8 @@
+# pijn runtime dependencies — all ship as wheels, so there is no build step.
+# Crypto (BIP-340 Schnorr, bech32, sha256) is pure-Python and vendored, so there
+# is no native crypto dependency.
+fastapi>=0.110
+uvicorn[standard]>=0.27   # brings the websockets server + client used by the relay
+pyyaml>=6.0               # policy file
+httpx>=0.26               # Blossom HTTP client
+websockets>=12.0          # relay WebSocket client (explicit, not just transitive)

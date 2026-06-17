@@ -1,0 +1,134 @@
+"""
+Site resolver.
+
+Turns (pubkey, identifier, request_path) into bytes + content-type by:
+  1. fetching the site manifest event (nsite, NIP-5A),
+  2. mapping the request path to a blob hash,
+  3. fetching that blob.
+
+Both steps go through small pluggable *sources* so the resolver works two ways
+without changing its logic (SPEC §2):
+
+  * co-resident in the daemon  -> Local sources read the shared SQLite DB and
+    blob directory directly (fast, deterministic, no network).
+  * standalone gateway         -> Remote sources query relays (WebSocket) and
+    Blossom servers (HTTP).
+
+The resolver itself owns no state — it is a pure projection of events + blobs.
+"""
+
+import mimetypes
+
+from ..nostr.nsite import (
+    KIND_LEGACY,
+    KIND_NAMED,
+    KIND_ROOT,
+    normalize_request_path,
+    parse_manifest,
+    resolve_blob,
+)
+
+
+# --- event sources -----------------------------------------------------------
+
+class LocalEventSource:
+    """Read manifests straight from a co-resident EventStore."""
+
+    def __init__(self, store):
+        self.store = store
+
+    def get_manifest(self, pubkey: str, identifier: str = ""):
+        if identifier:
+            filters = [{"authors": [pubkey], "kinds": [KIND_NAMED],
+                        "#d": [identifier], "limit": 1}]
+        else:
+            filters = [{"authors": [pubkey], "kinds": [KIND_ROOT, KIND_LEGACY], "limit": 1}]
+        events = self.store.query(filters)
+        return events[0] if events else None
+
+
+class RelayEventSource:
+    """Read manifests from one or more remote relays (WebSocket)."""
+
+    def __init__(self, relay_urls: list):
+        self.relay_urls = relay_urls
+
+    async def get_manifest(self, pubkey: str, identifier: str = ""):
+        from ..client.relay_client import RelayClient
+        if identifier:
+            filters = [{"authors": [pubkey], "kinds": [KIND_NAMED],
+                        "#d": [identifier], "limit": 1}]
+        else:
+            filters = [{"authors": [pubkey], "kinds": [KIND_ROOT, KIND_LEGACY], "limit": 1}]
+        newest = None
+        for url in self.relay_urls:
+            try:
+                for ev in await RelayClient(url).query(filters):
+                    if newest is None or ev.created_at > newest.created_at:
+                        newest = ev
+            except Exception:
+                continue
+        return newest
+
+
+# --- blob sources ------------------------------------------------------------
+
+class LocalBlobSource:
+    def __init__(self, blob_store):
+        self.blob_store = blob_store
+
+    def get(self, sha: str, server_hints=None):
+        return self.blob_store.get(sha)
+
+
+class HttpBlobSource:
+    def __init__(self, default_servers: list):
+        self.default_servers = default_servers
+
+    async def get(self, sha: str, server_hints=None):
+        from ..client.blossom_client import BlossomClient
+        for url in list(server_hints or []) + self.default_servers:
+            try:
+                return await BlossomClient(url).fetch(sha)
+            except Exception:
+                continue
+        return None
+
+
+# --- resolver ----------------------------------------------------------------
+
+class Resolver:
+    """Compose an event source + a blob source into site resolution.
+
+    `is_async` controls whether the sources are awaited (remote) or called
+    directly (local), so a single resolve() body serves both deployments.
+    """
+
+    def __init__(self, event_source, blob_source, is_async: bool = False):
+        self.event_source = event_source
+        self.blob_source = blob_source
+        self.is_async = is_async
+
+    async def resolve(self, pubkey: str, request_path: str, identifier: str = ""):
+        """Return (bytes, content_type) or None if the path is not in the site."""
+        if self.is_async:
+            event = await self.event_source.get_manifest(pubkey, identifier)
+        else:
+            event = self.event_source.get_manifest(pubkey, identifier)
+        if event is None:
+            return None
+
+        manifest = parse_manifest(event)
+        sha = resolve_blob(manifest, request_path)
+        if sha is None:
+            return None
+
+        if self.is_async:
+            data = await self.blob_source.get(sha, manifest["servers"])
+        else:
+            data = self.blob_source.get(sha, manifest["servers"])
+        if data is None:
+            return None
+
+        content_type, _ = mimetypes.guess_type(normalize_request_path(request_path))
+        return data, content_type or "application/octet-stream"
