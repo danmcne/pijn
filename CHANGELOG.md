@@ -4,6 +4,57 @@ All notable changes to pijn are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project versions by
 roadmap phase (see [`roadmap.md`](./roadmap.md)).
 
+## [0.3.0] — P3: replication & seeding
+
+A node can now mirror other people's sites and keep them reachable while their
+author is offline — the P3 exit criterion, verified with a two-node test (node A
+serves node B's site and blog after B is killed).
+
+### Added
+- **Replication controller** (`replication.py`): the fifth, state-less
+  coordinator. For each entry under `sites:` it pulls the manifest (and, for an
+  `app=blog`, the kind-30023 posts) from source relays and the blobs from
+  Blossom servers, writing them into this node's own stores — after which the
+  local gateway serves them. Everything pulled is verified before storage
+  (event signatures via `Event.verify()`, blob bytes via the content-address
+  check), so source relays/servers need not be trusted.
+- **`pijn sync`**: one-shot mirror of every configured site, with a per-site
+  report. `pijn run` also mirrors in the background (on startup, then on each
+  site's `refresh` cadence) when `sites:` is non-empty and local stores exist.
+- **Storage caps** (SPEC §4): `pin: true` bypasses all caps; otherwise a per-site
+  `storage_cap` triggers **file-level partial seeding** (files taken in manifest
+  order until the cap is hit, the rest skipped) and `limits.storage_total` is a
+  hard node ceiling. Policy parses `sites`, `limits.storage_total`, and `refresh`
+  durations (`15m`/`1h`/`2d`).
+- Supporting helpers: `BlobStore.total_bytes()`, `BlossomClient.head()`.
+
+### Notes / deferred to 0.3.1
+- `seed` is recorded but, with no announcement protocol yet, governs only future
+  advertisement — a content-addressed store serves any blob by hash, and blobs
+  are shared across sites, so per-site serve-suppression isn't meaningful yet.
+- Active LRU/popularity **eviction** (the controller currently enforces ceilings
+  by not exceeding them rather than evicting), **bandwidth budgets**, and
+  **seeder/relay discovery** ("find who else holds a site") are the remaining P3
+  items; hooks are in place.
+
+## [0.2.2] — P2 close: named-site reachability + docs
+
+### Changed
+- **Named sites are now served under the path URL** (`/s/<npub>/<id>/`) instead
+  of redirecting to the nested `<id>.<npub>.<host>` subdomain
+  (`gateway/server.py`). Nested `.localhost` names don't resolve reliably across
+  browsers, so the path form is the dependable local route; gateway-rendered
+  blogs and relative-link sites resolve correctly under the prefix (a `/s/.../id`
+  request without a trailing slash 307s to add one, preserving relative links).
+  The nested subdomain remains the canonical address and still works where it
+  resolves. Root sites still redirect to `<npub>.<host>` (single-level, reliable).
+
+### Docs
+- README rewritten around **root vs named sites**: the one-root-manifest-per-key
+  rule (why a root blog replaces a root static site), explicit `--identifier`
+  examples for both `publish` and `blog`, and both addressing forms with guidance
+  on which to use locally.
+
 ## [0.2.1] — P2: blog template (kind 30023) — P2 exit met
 
 Adds long-form blogging as a *projection*: posts are kind-30023 events (readable

@@ -100,6 +100,12 @@ class BlobStore:
             row = self._conn.execute("SELECT * FROM blobs WHERE sha256=?", (sha,)).fetchone()
         return dict(row) if row else None
 
+    def total_bytes(self) -> int:
+        """Sum of stored blob sizes — used by the replication node-storage ceiling."""
+        with self._lock:
+            row = self._conn.execute("SELECT COALESCE(SUM(size),0) AS t FROM blobs").fetchone()
+        return int(row["t"])
+
     def descriptor(self, sha: str, base_url: str = "") -> dict:
         """A Blossom blob descriptor (BUD-02)."""
         m = self.meta(sha) or {}

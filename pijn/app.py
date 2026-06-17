@@ -76,12 +76,29 @@ def build_node(policy: Policy, only: str | None = None) -> Node:
     return node
 
 
-async def _serve_all(node: Node):
+async def _serve_all(node: Node, controller=None):
     servers = [
         uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="info"))
         for (app, host, port) in node.apps.values()
     ]
-    await asyncio.gather(*(s.serve() for s in servers))
+    tasks = [s.serve() for s in servers]
+    if controller is not None:
+        tasks.append(controller.run_forever())
+    await asyncio.gather(*tasks)
+
+
+def build_controller(policy: Policy, node: Node):
+    """A replication controller iff this node has local stores to mirror into."""
+    if node.store is None or node.blob_store is None or not policy.sites:
+        return None
+    from .replication import ReplicationController
+
+    return ReplicationController(
+        store=node.store, blob_store=node.blob_store, sites=policy.sites,
+        source_relays=policy.relays_read or [policy.relay_public_url],
+        default_blossom=policy.blossom_servers or [policy.blossom_public_url],
+        storage_total=policy.storage_total,
+    )
 
 
 def run(policy: Policy, only: str | None = None):
@@ -89,12 +106,15 @@ def run(policy: Policy, only: str | None = None):
     node = build_node(policy, only=only)
     if not node.apps:
         raise SystemExit("no services enabled")
+    controller = build_controller(policy, node) if only is None else None
     names = ", ".join(
         f"{name} :{port}" for name, (_a, _h, port) in node.apps.items()
     )
+    if controller is not None:
+        names += f" | mirroring {len(policy.sites)} site(s)"
     print(f"pijn node up — {names}")
     try:
-        asyncio.run(_serve_all(node))
+        asyncio.run(_serve_all(node, controller))
     finally:
         if node.store:
             node.store.close()

@@ -44,6 +44,18 @@ class BlossomClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def head(self, sha: str) -> int | None:
+        """Return the blob's size in bytes via HEAD, or None if unavailable."""
+        async with httpx.AsyncClient(timeout=15) as client:
+            try:
+                resp = await client.head(f"{self.base_url}/{sha}")
+            except httpx.HTTPError:
+                return None
+        if resp.status_code != 200:
+            return None
+        cl = resp.headers.get("content-length")
+        return int(cl) if cl and cl.isdigit() else None
+
     async def fetch(self, sha: str) -> bytes:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(f"{self.base_url}/{sha}")

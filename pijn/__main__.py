@@ -9,6 +9,7 @@ pijn command-line interface.
     python -m pijn publish  <dir> [--identifier ID] [--title T] [--server URL] [--config policy.yaml]
     python -m pijn blog     [--title T] [--description D] [--identifier ID]  # mark origin as a blog
     python -m pijn post     <file.md> [--slug S] [--title T] [--summary D] [--tag X ...]  # kind 30023
+    python -m pijn sync     [--config policy.yaml]    # mirror sites in policy into this node
 
 The daemon and the publisher both read the same policy file (default
 `./policy.yaml`, falling back to built-in defaults if absent).
@@ -144,6 +145,41 @@ def _cmd_post(args):
     print("readable by any NIP-23 client; visible in your blog once `blog` is published")
 
 
+def _cmd_sync(args):
+    """One-shot: mirror every configured site into this node's stores now."""
+    from .event_store import EventStore
+    from .blob_store import BlobStore
+    from .replication import ReplicationController
+
+    policy = load_policy(args.config)
+    if not policy.sites:
+        print("no sites configured under `sites:` in the policy")
+        return
+    store = EventStore(policy.event_store.db)
+    blobs = BlobStore(policy.blob_store.path)
+    controller = ReplicationController(
+        store=store, blob_store=blobs, sites=policy.sites,
+        source_relays=policy.relays_read or [policy.relay_public_url],
+        default_blossom=policy.blossom_servers or [policy.blossom_public_url],
+        storage_total=policy.storage_total,
+    )
+    reports = asyncio.run(controller.sync_all())
+    store.close()
+    for r in reports:
+        loc = f"/{r['identifier']}" if r["identifier"] else ""
+        where = f"{r['name']} ({r['pubkey']}…{loc})"
+        if r["manifest"] == "not found":
+            print(f"  {where}: manifest not found on source relays")
+            continue
+        line = (f"  {where}: {r['files_fetched']} fetched, {r['files_present']} present, "
+                f"{r['files_skipped']} skipped, {r['bytes']} bytes")
+        if r["posts"]:
+            line += f", {r['posts']} posts"
+        if r["missing"]:
+            line += f", MISSING {len(r['missing'])}"
+        print(line)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="pijn")
     parser.add_argument("--config", default="policy.yaml", help="policy YAML path")
@@ -192,6 +228,9 @@ def main(argv=None):
     p_post.add_argument("--summary", default="")
     p_post.add_argument("--tag", action="append", help="topic tag (repeatable)")
     p_post.set_defaults(func=_cmd_post)
+
+    p_sync = sub.add_parser("sync", help="mirror the sites in your policy into this node now")
+    p_sync.set_defaults(func=_cmd_sync)
 
     args = parser.parse_args(argv)
     args.func(args)

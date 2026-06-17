@@ -41,4 +41,13 @@ moderation:
   content: { allow: [], block: [] }
   warn_on_override: true
 
+# Sites this node mirrors (P3). `pijn sync` pulls these now; `pijn run` keeps
+# them refreshed. Set `relays.read` to a relay that carries the author's events.
 sites: []
+  # - name: a-friends-blog
+  #   pubkey: npub1...          # author identity (npub or hex)
+  #   identifier: blog          # "" = their root site; else a named site
+  #   seed: true                # advertise to others (announcement: later)
+  #   pin: true                 # never evicted; ignore caps
+  #   storage_cap: 2GB          # if not pinned: keep a subset up to this, evict rest
+  #   refresh: 15m              # how often to re-pull for updates

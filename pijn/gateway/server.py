@@ -108,12 +108,21 @@ def build_gateway_app(resolver) -> FastAPI:
     async def root_path(npub: str, path: str, request: Request):
         return _redirect(npub, "", path, request)
 
+    # Named sites are *served* here, not redirected: their canonical origin is
+    # the nested `<id>.<npub>.<host>`, but nested `.localhost` doesn't resolve
+    # reliably in every browser, so the path form is the dependable local route.
+    # The gateway renders blogs (and relative-link sites) with relative links,
+    # which resolve correctly under this prefix.
     @app.get("/s/{npub}/{identifier}")
     async def named_index(npub: str, identifier: str, request: Request):
-        return _redirect(npub, identifier, "/", request)
+        # Add the trailing slash so the page's relative links keep the prefix.
+        return RedirectResponse(request.url.path + "/", status_code=307)
 
     @app.get("/s/{npub}/{identifier}/{path:path}")
     async def named_path(npub: str, identifier: str, path: str, request: Request):
-        return _redirect(npub, identifier, path, request)
+        pubkey = _label_pubkey(npub)
+        if pubkey is None:
+            return Response("invalid npub", status_code=400)
+        return await _render(pubkey, "/" + path, identifier)
 
     return app

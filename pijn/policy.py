@@ -57,6 +57,30 @@ def parse_size(value) -> int:
     return int(s)
 
 
+_DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def parse_duration(value) -> int:
+    """Parse '15m' / '1h' / '2d' into seconds. Bare ints pass through as seconds."""
+    s = str(value).strip().lower()
+    if s and s[-1] in _DURATION_UNITS:
+        return int(float(s[:-1]) * _DURATION_UNITS[s[-1]])
+    return int(s)
+
+
+@dataclass
+class SiteConfig:
+    """One entry under `sites:` — a site this node chooses to host (SPEC §4)."""
+    name: str
+    pubkey: str            # hex (normalized from npub or hex in the policy)
+    identifier: str = ""   # "" = root site; else named
+    seed: bool = True      # advertise/serve to others (announcement deferred; see replication.py)
+    pin: bool = True       # never evicted; ignores caps
+    storage_cap: int = 0   # bytes; 0 = unlimited (file-level partial seed if exceeded)
+    transport: str = "direct"
+    refresh: int = 900     # seconds between manifest re-pulls
+
+
 @dataclass
 class Policy:
     nsec_file: str = "./.pijn/nsec"
@@ -97,6 +121,36 @@ class Policy:
         """Max accepted blob size in bytes (limits.blob_max_size; default 100MB)."""
         raw = (self.raw.get("limits") or {}).get("blob_max_size", "100MB")
         return parse_size(raw)
+
+    @property
+    def storage_total(self) -> int:
+        """Node-wide storage ceiling in bytes (limits.storage_total; 0 = unlimited)."""
+        raw = (self.raw.get("limits") or {}).get("storage_total")
+        return parse_size(raw) if raw else 0
+
+    @property
+    def sites(self) -> list:
+        """Parsed `sites:` entries (the replication controller's work list)."""
+        from .nostr.bech32 import normalize_pubkey
+
+        out = []
+        for entry in (self.raw.get("sites") or []):
+            pk = entry.get("pubkey", "")
+            try:
+                pk = normalize_pubkey(pk)
+            except ValueError:
+                continue  # skip entries without a usable key
+            out.append(SiteConfig(
+                name=entry.get("name", pk[:8]),
+                pubkey=pk,
+                identifier=entry.get("identifier", "") or "",
+                seed=bool(entry.get("seed", True)),
+                pin=bool(entry.get("pin", True)),
+                storage_cap=parse_size(entry["storage_cap"]) if entry.get("storage_cap") else 0,
+                transport=entry.get("transport", "direct"),
+                refresh=parse_duration(entry.get("refresh", 900)),
+            ))
+        return out
 
     # --- key loading (never from the policy file) ---
     def load_keypair(self) -> Keypair:
