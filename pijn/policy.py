@@ -20,9 +20,10 @@ import yaml
 from .nostr.keys import Keypair
 
 # Default listen addresses match SPEC §4 (relay 4848 / blob 4849 / gateway 4850).
+# db/path are resolved per-identity under ~/.pijn/<npub>/ unless the policy sets them.
 _DEFAULTS = {
-    "event_store": {"enabled": True, "listen": "127.0.0.1:4848", "db": "./relay.sqlite"},
-    "blob_store": {"enabled": True, "listen": "127.0.0.1:4849", "path": "./blobs"},
+    "event_store": {"enabled": True, "listen": "127.0.0.1:4848", "db": ""},
+    "blob_store": {"enabled": True, "listen": "127.0.0.1:4849", "path": ""},
     "gateway": {"enabled": True, "listen": "127.0.0.1:4850"},
 }
 
@@ -85,6 +86,7 @@ class SiteConfig:
 class Policy:
     nsec_file: str = "./.pijn/nsec"
     npub: str = ""
+    data_dir: str = "."
     services: dict = field(default_factory=dict)
     relays_read: list = field(default_factory=list)
     relays_write: list = field(default_factory=list)
@@ -129,6 +131,28 @@ class Policy:
         return parse_size(raw) if raw else 0
 
     @property
+    def bandwidth_day(self) -> int:
+        raw = (self.raw.get("limits") or {}).get("bandwidth_day")
+        return parse_size(raw) if raw else 0
+
+    @property
+    def bandwidth_month(self) -> int:
+        raw = (self.raw.get("limits") or {}).get("bandwidth_month")
+        return parse_size(raw) if raw else 0
+
+    @property
+    def state_dir(self) -> str:
+        """Where small persisted state (e.g. the bandwidth meter) lives."""
+        return self.data_dir
+
+    @property
+    def eviction(self) -> dict:
+        """Eviction config (default 'manual' — never auto-evict; SPEC §4)."""
+        e = self.raw.get("eviction") or {}
+        return {"policy": e.get("policy", "manual"),
+                "protect_pinned": bool(e.get("protect_pinned", True))}
+
+    @property
     def sites(self) -> list:
         """Parsed `sites:` entries (the replication controller's work list)."""
         from .nostr.bech32 import normalize_pubkey
@@ -152,34 +176,30 @@ class Policy:
             ))
         return out
 
-    # --- key loading (never from the policy file) ---
+    # --- key loading (never from the policy file; nsec is encrypted at rest) ---
     def load_keypair(self) -> Keypair:
-        nsec = os.environ.get("PIJN_NSEC")
-        if nsec:
-            return Keypair.from_nsec(nsec.strip())
-        if os.path.exists(self.nsec_file):
-            with open(self.nsec_file) as f:
-                return Keypair.from_nsec(f.read().strip())
-        raise FileNotFoundError(
-            f"no key: set PIJN_NSEC or create {self.nsec_file} (try `pijn keygen`)"
-        )
+        from . import keystore
+        return keystore.load_active_keypair(self.npub)
 
 
-def _build_services(raw_services: dict) -> dict:
+def _build_services(raw_services: dict, data_dir: str) -> dict:
     services = {}
     for name, defaults in _DEFAULTS.items():
         cfg = {**defaults, **(raw_services.get(name) or {})}
         host, port = _parse_listen(cfg["listen"])
+        db = cfg.get("db") or os.path.join(data_dir, "relay.sqlite")
+        path = cfg.get("path") or os.path.join(data_dir, "blobs")
         services[name] = ServiceConfig(
             enabled=bool(cfg.get("enabled", True)),
-            host=host, port=port,
-            db=cfg.get("db", ""), path=cfg.get("path", ""),
+            host=host, port=port, db=db, path=path,
         )
     return services
 
 
 def load_policy(path: str | None) -> Policy:
     """Load a policy file, or return all-defaults when `path` is None/missing."""
+    from . import keystore
+
     raw = {}
     if path and os.path.exists(path):
         with open(path) as f:
@@ -189,10 +209,15 @@ def load_policy(path: str | None) -> Policy:
     relays = raw.get("relays", {}) or {}
     blossom = raw.get("blossom", {}) or {}
 
+    # The node's identity (operator) and its data home under ~/.pijn/<npub>/.
+    npub = identity.get("npub") or keystore.active_npub()
+    data_dir = keystore.identity_dir(npub) if npub else "."
+
     return Policy(
         nsec_file=identity.get("nsec_file", "./.pijn/nsec"),
-        npub=identity.get("npub", ""),
-        services=_build_services(raw.get("services", {}) or {}),
+        npub=npub,
+        data_dir=data_dir,
+        services=_build_services(raw.get("services", {}) or {}, data_dir),
         relays_read=relays.get("read", []),
         relays_write=relays.get("write", []),
         relays_trusted=relays.get("trusted", []),

@@ -235,6 +235,14 @@ npub allow/block + per-content overrides** (§4).
   flow + Cashu (NIP-87/60/61) for payment; treat NIP-69 + escrow/reputation as
   the P7 research track (the genuinely unsolved part that sank OpenBazaar).
 
+- **D4 — seed announcement (pijn extension, P3).** Seeder discovery has no
+  standard, so pijn defines an addressable **kind 30888**: a node signs it with
+  its own key to advertise "I host site `kind:pubkey:identifier`", carrying the
+  seeder's blob `server`s and `relay`s. `d`/`a` = the site coordinate, `p` = the
+  author. A mirrorer queries `#a` to find extra places to pull from; vanilla
+  clients ignore the unknown kind. This is the one non-NIP surface in pijn — if a
+  seeder-discovery NIP emerges, migrate to it behind `discovery.discover_seeders`.
+
 **Still open (your call):** which forum NIP — NIP-72 (reddit-style) vs NIP-7D
 (usenet/threads) — decided at P6 entry (see D2); whether unified author/host
 tipping (NIP-57 zaps + Cashu) lands in P6 (if template-only) or as the first item

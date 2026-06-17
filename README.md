@@ -4,12 +4,14 @@
 choose how much of the network they support, and a "website" is just one way of
 rendering that content.** Built *on* Nostr, not beside it.
 
-> **Status:** P3 in progress (v0.3.0). On top of P2 (per-site origins; a
-> templated `static`/`blog` publisher), a **replication controller** mirrors
-> other people's sites (`sites:` in policy, `pijn sync`) and keeps them reachable
-> when the author is offline, with `pin` and file-level `storage_cap` partial
-> seeding. Naming primitives (NIP-05 + npub digest) landed in v0.1.2. Active
-> eviction, bandwidth budgets, and seeder discovery finish P3 next. See
+> **Status:** v0.3.3 — P3 complete, now with all data under `~/.pijn/<npub>/`
+> (survives reinstalls) and the **nsec encrypted at rest** (vendored
+> ChaCha20-Poly1305 + scrypt; daemon runs without it). On top of P2 (per-site
+> origins; templated `static`/`blog` publisher), a **replication controller**
+> mirrors others' sites, discovers their relays and seeders (NIP-65 + kind-30888,
+> `pijn announce`), and keeps a site reachable when its **author** is offline —
+> with `pin`, `storage_cap`, eviction, and bandwidth budgets. Next is P4
+> (transport: Direct/Tor). See
 > [`SPEC.md`](./SPEC.md) for the frozen architecture,
 > [`roadmap.md`](./roadmap.md) for the full plan, and [`CHANGELOG.md`](./CHANGELOG.md)
 > for what landed in each phase.
@@ -96,9 +98,22 @@ Configuration is a single YAML policy file (schema in
 pip install -r requirements.txt
 cp policy.example.yaml policy.yaml
 
-python -m pijn keygen                 # create your identity (writes ./.pijn/nsec, chmod 600)
+python -m pijn keygen                 # create your identity (encrypts the nsec; asks a passphrase)
 python -m pijn run                    # start relay :4848, blob-store :4849, gateway :4850
 ```
+
+All data lives under **`~/.pijn/<npub>/`** (relay db, blobs, state), so reinstalling
+the code never touches it; set `PIJN_HOME` to relocate it. Your **nsec is stored
+encrypted** (`~/.pijn/<npub>/nsec.enc`) and unlocked with your passphrase when a
+signing command needs it — or set `PIJN_PASSPHRASE` for automation, or bypass with
+a plaintext `PIJN_NSEC`. The **npub is plaintext** (public), so `pubkey` needs no
+passphrase, and the **daemon runs unattended** — only `publish`/`post`/`blog`/
+`announce` ask for the passphrase. `pijn identities` lists your keys (`--use` switches).
+
+`keygen` is interactive: if an identity already exists it offers to keep it
+(unlocking and verifying the key works) or overwrite it, and when making a new one
+it asks whether to import an existing `nsec` (checked before it's saved) or generate
+a fresh key. Use `keygen --force` to non-interactively overwrite with a new key.
 
 ### Addressing — root sites and named sites
 
@@ -224,6 +239,24 @@ blob servers you pull from don't have to be trusted. `pin: true` keeps a full
 copy; otherwise `storage_cap` keeps a subset of files (file-level partial
 seeding) and `limits.storage_total` caps the whole node.
 
+**Discovery.** You don't have to know the author's relay: the controller reads
+their NIP-65 relay list (kind 10002) and pulls from the relays it names, so one
+shared/indexer relay in `relays.read` is enough to find them. It also looks for
+**other seeders** of the site (kind-30888 announcements) and will pull the
+manifest and blobs from them too — so a site stays reachable even if the *author*
+is offline, as long as someone seeds it. To make yourself discoverable as an
+author and to advertise the sites you seed:
+
+```bash
+python -m pijn announce       # publishes your relay list + a seed announcement per seeded site
+```
+
+**Budgets.** `limits.storage_total` caps total disk; `limits.bandwidth_day` and
+`bandwidth_month` cap how much replication downloads (metered across restarts).
+When the node hits `storage_total`, `eviction.policy` decides what gives — default
+`manual` (nothing auto-deleted; you prune), or `lru` to drop least-recently-stored
+blobs; `protect_pinned: true` never evicts a pinned site's blobs.
+
 ### Running services separately
 
 Each service can run alone (they bind separate ports):
@@ -234,8 +267,9 @@ python -m pijn run --only blob_store     # just the Blossom server
 python -m pijn run --only gateway        # just the resolver/renderer
 ```
 
-Your `nsec` never enters the policy file or any server — it is read only from
-`./.pijn/nsec` or the `PIJN_NSEC` environment variable, and only to sign.
+Your `nsec` never enters the policy file or any server — it lives encrypted in
+`~/.pijn/<npub>/nsec.enc`, is read only to sign, and is decrypted into memory only
+when you run a signing command.
 
 ## Roadmap at a glance
 
@@ -257,15 +291,20 @@ pijn/
 ├── policy.example.yaml   # policy template (SPEC §4)
 ├── examplesite/          # a tiny static site for the publish demo
 └── pijn/                 # the daemon package
-    ├── __main__.py       # CLI: run/keygen/pubkey/whois/init/publish/blog/post
+    ├── __main__.py       # CLI: run/keygen/pubkey/identities/whois/init/publish/blog/post/sync/announce
     ├── app.py            # service composition + daemon runner
-    ├── policy.py         # YAML policy loader
+    ├── policy.py         # YAML policy loader (data paths under ~/.pijn/<npub>/)
+    ├── keystore.py       # identity/data home; encrypted-key load/save
     ├── publish.py        # static-site publisher (content-typed blobs + manifest)
     ├── post.py           # blog authoring: kind-30023 posts + app=blog manifest
     ├── templates.py      # `init` scaffolds (static site, blog starter)
     ├── replication.py    # P3: mirror configured sites into the local stores
+    ├── discovery.py      # P3: NIP-65 relay discovery + seeder announce/discovery
+    ├── eviction.py       # P3: storage-cap eviction strategies (manual/lru/popularity)
+    ├── bandwidth.py      # P3: persisted daily/monthly download budget
     ├── nostr/            # pure-Python core: schnorr, bech32, keys, events,
-    │                     #   filters, nsite manifests, nip05, display (npub digest)
+    │                     #   filters, nsite manifests, nip05, display, cipher
+    │                     #   (ChaCha20-Poly1305 for the encrypted nsec)
     ├── event_store/      # SQLite persistence + NIP-01 WebSocket relay
     ├── blob_store/       # content-addressed storage + Blossom HTTP + 24242 auth
     ├── client/           # outbound relay (WS) + Blossom (HTTP) clients

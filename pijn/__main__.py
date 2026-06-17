@@ -2,14 +2,16 @@
 pijn command-line interface.
 
     python -m pijn run      [--config policy.yaml] [--only event_store|blob_store|gateway]
-    python -m pijn keygen   [--config policy.yaml]   # create + save a keypair
-    python -m pijn pubkey   [--config policy.yaml]   # print this node's npub
+    python -m pijn keygen   [--force]                # create/import an identity (nsec encrypted)
+    python -m pijn pubkey                            # print the active npub (plaintext, no passphrase)
+    python -m pijn identities [--use <npub>]         # list identities under ~/.pijn / switch active
     python -m pijn whois    <nip05-or-npub>          # resolve a name / show digest
     python -m pijn init     <dir> [--template static] [--title T]  # scaffold a site
     python -m pijn publish  <dir> [--identifier ID] [--title T] [--server URL] [--config policy.yaml]
     python -m pijn blog     [--title T] [--description D] [--identifier ID]  # mark origin as a blog
     python -m pijn post     <file.md> [--slug S] [--title T] [--summary D] [--tag X ...]  # kind 30023
     python -m pijn sync     [--config policy.yaml]    # mirror sites in policy into this node
+    python -m pijn announce [--config policy.yaml]    # publish your NIP-65 relay list (discovery)
 
 The daemon and the publisher both read the same policy file (default
 `./policy.yaml`, falling back to built-in defaults if absent).
@@ -17,6 +19,7 @@ The daemon and the publisher both read the same policy file (default
 
 import argparse
 import asyncio
+import getpass
 import os
 
 from . import app as node_app
@@ -29,22 +32,122 @@ def _cmd_run(args):
     node_app.run(policy, only=args.only)
 
 
-def _cmd_keygen(args):
-    policy = load_policy(args.config)
-    if os.path.exists(policy.nsec_file) and not args.force:
-        raise SystemExit(f"{policy.nsec_file} exists; pass --force to overwrite")
+def _verify_keypair(kp: Keypair) -> bool:
+    """Confirm a key actually works: sign a random message and verify it."""
+    from .nostr import schnorr
+
+    try:
+        msg = os.urandom(32)
+        sig = schnorr.schnorr_sign(msg, kp.seckey_bytes)
+        return schnorr.schnorr_verify(msg, bytes.fromhex(kp.pubkey_hex), sig)
+    except Exception:
+        return False
+
+
+def _ask(prompt: str, default: str = "") -> str:
+    try:
+        return input(prompt).strip() or default
+    except EOFError:
+        return default
+
+
+def _new_identity() -> Keypair | None:
+    """Import an existing nsec or generate a fresh one; verify either way."""
+    src = _ask("Import an existing nsec, or generate a new one? [i/g] (g): ", "g").lower()
+    if src.startswith("i"):
+        try:
+            entered = getpass.getpass("Paste nsec (nsec1...): ").strip()
+        except Exception:
+            entered = ""
+        try:
+            kp = Keypair.from_nsec(entered)
+        except Exception:
+            print("That isn't a valid nsec — nothing was written.")
+            return None
+        if not _verify_keypair(kp):
+            print("That key failed a sign/verify check — nothing was written.")
+            return None
+        print(f"Imported and verified {kp.npub}")
+        return kp
     kp = Keypair.generate()
-    os.makedirs(os.path.dirname(policy.nsec_file) or ".", exist_ok=True)
-    with open(policy.nsec_file, "w") as f:
-        f.write(kp.nsec + "\n")
-    os.chmod(policy.nsec_file, 0o600)  # the nsec is the crown jewel
-    print(f"saved secret key to {policy.nsec_file} (chmod 600)")
-    print(f"npub: {kp.npub}")
+    print(f"Generated a new identity: {kp.npub}")
+    return kp
+
+
+def _new_password() -> str:
+    """Prompt for a new passphrase (twice), or take PIJN_PASSPHRASE for automation."""
+    env = os.environ.get("PIJN_PASSPHRASE")
+    if env is not None:
+        return env
+    while True:
+        p1 = getpass.getpass("Set a passphrase to encrypt your nsec: ")
+        p2 = getpass.getpass("Confirm passphrase: ")
+        if p1 and p1 == p2:
+            return p1
+        print("Passphrases didn't match (or were empty); try again.")
+
+
+def _cmd_keygen(args):
+    from . import keystore
+
+    if args.force:  # non-interactive: overwrite the active identity with a fresh key
+        kp = Keypair.generate()
+        keystore.save_identity(kp, _new_password())
+        print(f"saved new encrypted identity under {keystore.identity_dir(kp.npub)}\nnpub: {kp.npub}")
+        return
+
+    existing = keystore.active_npub()
+    if existing and keystore.has_encrypted_key(existing):
+        print(f"An identity already exists: {existing}")
+        if _ask("Keep it, or overwrite? [k/o] (k): ", "k").lower().startswith("k"):
+            pw = os.environ.get("PIJN_PASSPHRASE")
+            if pw is None:
+                pw = getpass.getpass(f"Passphrase to verify {existing[:12]}…: ")
+            try:
+                kp = keystore.load_keypair(existing, pw)
+            except Exception:
+                print("Couldn't unlock that key (wrong passphrase or corrupt file). "
+                      "Run keygen again and choose overwrite to make a new one.")
+                return
+            if _verify_keypair(kp):
+                print(f"Verified working — using {existing}")
+            else:
+                print("This key FAILED a sign/verify check; it does not work. "
+                      "Run keygen again and choose overwrite to create a new one.")
+            return
+        # fall through to create a new identity (overwrite the active pointer)
+
+    kp = _new_identity()
+    if kp is not None:
+        keystore.save_identity(kp, _new_password())
+        print(f"saved encrypted identity under {keystore.identity_dir(kp.npub)}\nnpub: {kp.npub}")
 
 
 def _cmd_pubkey(args):
-    policy = load_policy(args.config)
-    print(policy.load_keypair().npub)
+    from . import keystore
+
+    npub = keystore.active_npub()
+    if not npub:
+        raise SystemExit("no identity; run `pijn keygen` first")
+    print(npub)  # public, read from plaintext — no passphrase needed
+
+
+def _cmd_identities(args):
+    from . import keystore
+
+    active = keystore.active_npub()
+    ids = keystore.list_identities()
+    if not ids:
+        print(f"no identities under {keystore.pijn_home()} (run `pijn keygen`)")
+        return
+    if args.use:
+        if args.use not in ids:
+            raise SystemExit(f"{args.use} is not a known identity")
+        keystore.set_active(args.use)
+        print(f"active identity is now {args.use}")
+        return
+    for npub in ids:
+        print(("* " if npub == active else "  ") + npub)
 
 
 def _cmd_whois(args):
@@ -155,13 +258,19 @@ def _cmd_sync(args):
     if not policy.sites:
         print("no sites configured under `sites:` in the policy")
         return
+    os.makedirs(policy.data_dir, exist_ok=True)
     store = EventStore(policy.event_store.db)
     blobs = BlobStore(policy.blob_store.path)
+    from .bandwidth import BandwidthMeter
+    meter = BandwidthMeter(
+        os.path.join(policy.state_dir, "bandwidth.json"),
+        day_cap=policy.bandwidth_day, month_cap=policy.bandwidth_month,
+    )
     controller = ReplicationController(
         store=store, blob_store=blobs, sites=policy.sites,
         source_relays=policy.relays_read or [policy.relay_public_url],
         default_blossom=policy.blossom_servers or [policy.blossom_public_url],
-        storage_total=policy.storage_total,
+        storage_total=policy.storage_total, eviction=policy.eviction, meter=meter,
     )
     reports = asyncio.run(controller.sync_all())
     store.close()
@@ -171,13 +280,64 @@ def _cmd_sync(args):
         if r["manifest"] == "not found":
             print(f"  {where}: manifest not found on source relays")
             continue
+        extra = []
+        if r["relays_discovered"]:
+            extra.append(f"+{r['relays_discovered']} relay(s)")
+        if r["seeders"]:
+            extra.append(f"{r['seeders']} seeder(s)")
         line = (f"  {where}: {r['files_fetched']} fetched, {r['files_present']} present, "
                 f"{r['files_skipped']} skipped, {r['bytes']} bytes")
         if r["posts"]:
             line += f", {r['posts']} posts"
         if r["missing"]:
             line += f", MISSING {len(r['missing'])}"
+        if extra:
+            line += " [" + ", ".join(extra) + "]"
         print(line)
+
+
+def _cmd_announce(args):
+    """Publish this node's NIP-65 relay list and a seed announcement per seeded site."""
+    from .discovery import build_relay_list_event, build_seed_announcement
+    from .nostr.nsite import KIND_NAMED, KIND_ROOT
+    from .client.relay_client import RelayClient
+
+    policy = load_policy(args.config)
+    kp = policy.load_keypair()
+    targets = policy.relays_write or [policy.relay_public_url]
+
+    events = [("relay list (kind 10002)",
+               build_relay_list_event(policy.relays_read, policy.relays_write)
+               .sign(kp.seckey_bytes))]
+    # Advertise the sites this node hosts (seed: true), pointing at its own
+    # blob server + relay so others can discover and pull from this seeder.
+    my_servers = [policy.blossom_public_url]
+    my_relays = policy.relays_write or [policy.relay_public_url]
+    for site in policy.sites:
+        if not site.seed:
+            continue
+        kind = KIND_NAMED if site.identifier else KIND_ROOT
+        ev = build_seed_announcement(kind, site.pubkey, site.identifier,
+                                     my_servers, my_relays).sign(kp.seckey_bytes)
+        events.append((f"seed: {site.name}", ev))
+
+    async def _go():
+        out = []
+        for label, ev in events:
+            results = []
+            for url in targets:
+                try:
+                    ok, msg = await RelayClient(url).publish(ev)
+                except Exception as e:
+                    ok, msg = False, str(e)
+                results.append((url, ok))
+            out.append((label, results))
+        return out
+
+    print(f"announced as {kp.npub}")
+    for label, results in asyncio.run(_go()):
+        oks = sum(1 for _u, ok in results if ok)
+        print(f"  {label}: {oks}/{len(results)} relays ok")
 
 
 def main(argv=None):
@@ -195,6 +355,10 @@ def main(argv=None):
 
     p_pubkey = sub.add_parser("pubkey", help="print this node's npub")
     p_pubkey.set_defaults(func=_cmd_pubkey)
+
+    p_ids = sub.add_parser("identities", help="list identities under ~/.pijn (or switch with --use)")
+    p_ids.add_argument("--use", default="", help="set the active identity to this npub")
+    p_ids.set_defaults(func=_cmd_identities)
 
     p_whois = sub.add_parser("whois", help="resolve a NIP-05 name or show an npub digest")
     p_whois.add_argument("identity", help="a NIP-05 (alice@example.com) or an npub/hex pubkey")
@@ -232,8 +396,14 @@ def main(argv=None):
     p_sync = sub.add_parser("sync", help="mirror the sites in your policy into this node now")
     p_sync.set_defaults(func=_cmd_sync)
 
+    p_announce = sub.add_parser("announce", help="publish your NIP-65 relay list (kind 10002)")
+    p_announce.set_defaults(func=_cmd_announce)
+
     args = parser.parse_args(argv)
-    args.func(args)
+    try:
+        args.func(args)
+    except (FileNotFoundError, ValueError) as e:
+        raise SystemExit(f"error: {e}")
 
 
 if __name__ == "__main__":

@@ -43,6 +43,8 @@ class Node:
 def build_node(policy: Policy, only: str | None = None) -> Node:
     node = Node()
     es, bs, gw = policy.event_store, policy.blob_store, policy.gateway
+    import os
+    os.makedirs(policy.data_dir, exist_ok=True)  # ~/.pijn/<npub>/
 
     def wanted(name: str, enabled: bool) -> bool:
         return enabled and (only is None or only == name)
@@ -91,13 +93,20 @@ def build_controller(policy: Policy, node: Node):
     """A replication controller iff this node has local stores to mirror into."""
     if node.store is None or node.blob_store is None or not policy.sites:
         return None
+    import os
+
+    from .bandwidth import BandwidthMeter
     from .replication import ReplicationController
 
+    meter = BandwidthMeter(
+        os.path.join(policy.state_dir, "bandwidth.json"),
+        day_cap=policy.bandwidth_day, month_cap=policy.bandwidth_month,
+    )
     return ReplicationController(
         store=node.store, blob_store=node.blob_store, sites=policy.sites,
         source_relays=policy.relays_read or [policy.relay_public_url],
         default_blossom=policy.blossom_servers or [policy.blossom_public_url],
-        storage_total=policy.storage_total,
+        storage_total=policy.storage_total, eviction=policy.eviction, meter=meter,
     )
 
 

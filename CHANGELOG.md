@@ -4,6 +4,88 @@ All notable changes to pijn are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project versions by
 roadmap phase (see [`roadmap.md`](./roadmap.md)).
 
+## [0.3.3] — persistent data home + encrypted key at rest
+
+### Changed
+- **All data lives under `~/.pijn/<npub>/`** (`keystore.py`): the encrypted key,
+  relay db, blob store, and bandwidth state, partitioned by operator identity, so
+  reinstalling or upgrading the code never touches your data and one machine can
+  host several node identities. Override the root with `PIJN_HOME`. The example
+  policy no longer hardcodes `db`/`path` (they default into the data home).
+- **The nsec is encrypted at rest** (`nostr/cipher.py`): a vendored, dependency-
+  free ChaCha20-Poly1305 (RFC 8439, verified against the spec vectors) with an
+  scrypt-derived key. `keygen` prompts for a passphrase; signing commands unlock
+  the key with it (or `PIJN_PASSPHRASE` for automation, or a plaintext
+  `PIJN_NSEC`). The **npub stays plaintext** (`~/.pijn/<npub>/npub` and the dir
+  name), so `pubkey` and path resolution need no passphrase, and the **daemon
+  (`run`) never needs the key** — it serves and mirrors unattended.
+
+### Added
+- **`pijn identities`** lists the keys under `~/.pijn` (marking the active one);
+  `--use <npub>` switches the active identity.
+
+### Migrating from ≤0.3.2
+- Old nodes kept a plaintext `./.pijn/nsec` and data in the working directory.
+  To carry an identity over: run `pijn keygen`, choose overwrite → import, and
+  paste the nsec from your old `./.pijn/nsec`; set a passphrase. Then re-publish
+  / re-`sync` (or move the old `relay.sqlite`/`blobs` into `~/.pijn/<npub>/`).
+
+## [0.3.2] — P3 close: seeder discovery, bandwidth budgets, default relays
+
+This finishes P3. A site can now stay up purely because a *third party* seeds it.
+
+### Added
+- **Seeder discovery** (`discovery.py`, SPEC delta **D4**): a node advertises the
+  sites it hosts with an addressable **kind-30888** seed announcement (signed by
+  the seeder, keyed by the site coordinate, carrying its blob `server`s and
+  `relay`s). `pijn announce` now publishes one per `seed: true` site alongside
+  the NIP-65 relay list. The controller queries `#a` for a site's seeders and
+  adds their relays/servers to its pull set — so a mirrorer can fetch a site from
+  another seeder with the **author offline**. Verified with a four-node test
+  (author down; a fresh node knowing only a shared relay discovers the seeder and
+  serves the full site).
+- **Bandwidth budget** (`bandwidth.py`): `limits.bandwidth_day` and
+  `bandwidth_month` cap replication downloads, metered in a small JSON file that
+  rolls over on the UTC day/month and survives restarts. Checked before each
+  fetch (applies even to pinned sites — bandwidth is a hard external limit).
+
+### Changed
+- **Default relays** in the example policy: your local relay plus
+  `relay.damus.io`, `nos.lol`, `relay.primal.net`, `relay.nostr.band`, so
+  discovery and `announce` reach the wider network out of the box.
+- Lower default `limits` now include `bandwidth_day: 1GB` (with `bandwidth_month: 10GB`).
+
+### Note
+- Seed announcements point at the node's configured blob/relay URLs; on a
+  loopback-only setup those are `127.0.0.1`, so cross-machine seeding needs
+  publicly reachable URLs — which is exactly what P4 (transport: Direct/Tor)
+  provides.
+
+## [0.3.1] — P3: discovery, interactive keygen, eviction config
+
+### Added
+- **Relay discovery (NIP-65)** (`discovery.py`): the controller now reads each
+  site author's kind-10002 relay list to find their outbox relays, so it can
+  mirror a site knowing only a shared/indexer relay — verified with a three-node
+  test (seeder discovers the author's relay and mirrors without it configured).
+  New `pijn announce` publishes this node's own relay list so others can find it.
+- **Configurable eviction** (`eviction.py`): `eviction.policy` selects how room
+  is made under `limits.storage_total`. Default **manual** (never auto-evict —
+  the operator prunes, matching the opt-in model); `lru` and `popularity`
+  (currently LRU-backed until access stats exist) plug in behind one function.
+  `protect_pinned` shields pinned sites' blobs. Wired into `sync`/`run`.
+
+### Changed
+- **`keygen` is now interactive**: if an identity already exists it offers
+  keep-or-overwrite, and **verifies** a kept key with a real sign/verify check
+  (reporting clearly if it doesn't work); a corrupt key file is detected and a
+  replacement offered. Creating a new identity asks whether to **import an
+  existing nsec** (validated before it's written) or generate a fresh one.
+  `keygen --force` keeps the old non-interactive "overwrite with a new key".
+- **Lower default ceilings** in the example policy: `storage_total: 2GB`,
+  `bandwidth_month: 10GB` (raise as you choose to host more); example
+  `eviction.policy` is now `manual`.
+
 ## [0.3.0] — P3: replication & seeding
 
 A node can now mirror other people's sites and keep them reachable while their

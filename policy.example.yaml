@@ -1,24 +1,35 @@
 # pijn node policy — see SPEC.md §4 for the full schema.
-# P1 reads: identity, services, relays, blossom.
-# The rest (transport, limits, eviction, moderation, sites) is parsed and kept
-# for later phases (P3 replication, P4 transport) — present here so a complete
-# file loads cleanly today.
+# Data lives under ~/.pijn/<npub>/ (relay db, blobs, state), so reinstalling the
+# code never touches it. Override the root with the PIJN_HOME env var.
 version: 1
 
 identity:
-  # The nsec is NEVER stored here. `pijn keygen` writes it to nsec_file (chmod
-  # 600); or set PIJN_NSEC in the environment. npub is informational.
+  # The nsec is stored ENCRYPTED at ~/.pijn/<npub>/nsec.enc and unlocked with a
+  # passphrase when a signing command needs it (or via PIJN_PASSPHRASE for
+  # automation; or bypass entirely with a plaintext PIJN_NSEC). `npub` here is
+  # optional — it pins which identity this node uses; otherwise ~/.pijn/active.
   npub: ""
-  nsec_file: ./.pijn/nsec
 
 services:
-  event_store: { enabled: true, listen: "127.0.0.1:4848", db: "./relay.sqlite" }
-  blob_store:  { enabled: true, listen: "127.0.0.1:4849", path: "./blobs" }
+  # Omit `db`/`path` to use the defaults under ~/.pijn/<npub>/. Set them only to
+  # override the location.
+  event_store: { enabled: true, listen: "127.0.0.1:4848" }
+  blob_store:  { enabled: true, listen: "127.0.0.1:4849" }
   gateway:     { enabled: true, listen: "127.0.0.1:4850" }
 
 relays:
-  read:  ["ws://127.0.0.1:4848"]
-  write: ["ws://127.0.0.1:4848"]
+  # Your own relay first, then a few reliable public ones so discovery/announce
+  # reach the wider network. Trim or replace to taste.
+  read:
+    - "ws://127.0.0.1:4848"
+    - "wss://relay.damus.io"
+    - "wss://nos.lol"
+    - "wss://relay.primal.net"
+    - "wss://relay.nostr.band"
+  write:
+    - "ws://127.0.0.1:4848"
+    - "wss://relay.damus.io"
+    - "wss://nos.lol"
   # Seeds the web of trust (SPEC §7): the follow-graphs and NIP-05 vouches stored
   # on these relays prime name ranking / anti-impersonation. Inert until P6.
   trusted: []
@@ -31,9 +42,12 @@ transport:
   default: direct
   tor: { socks: "127.0.0.1:9050", inbound_onion: false }
 
-limits: { storage_total: 20GB, bandwidth_month: 200GB, blob_max_size: 100MB }
+# Conservative ceilings to start (raise as you choose to host more).
+limits: { storage_total: 2GB, bandwidth_day: 1GB, bandwidth_month: 10GB, blob_max_size: 100MB }
 
-eviction: { policy: lru, protect_pinned: true }
+# How to make room when storage_total is hit. Default 'manual' = never auto-evict
+# (you chose what to mirror, so you prune). Other policies: lru | popularity.
+eviction: { policy: manual, protect_pinned: true }
 
 moderation:
   mode: opt-in

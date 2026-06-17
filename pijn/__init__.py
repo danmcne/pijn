@@ -6,4 +6,4 @@ relay, Blossom blob-store, gateway/resolver) plus a YAML policy loader and a
 minimal publisher. See SPEC.md for the architecture and roadmap.md for the plan.
 """
 
-__version__ = "0.3.0"  # P3: replication controller — mirror sites, partial seeding
+__version__ = "0.3.3"  # data home under ~/.pijn/<npub>/; nsec encrypted at rest

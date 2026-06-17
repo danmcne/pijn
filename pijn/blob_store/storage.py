@@ -106,6 +106,25 @@ class BlobStore:
             row = self._conn.execute("SELECT COALESCE(SUM(size),0) AS t FROM blobs").fetchone()
         return int(row["t"])
 
+    def entries(self) -> list:
+        """All blobs as {sha256, size, uploaded_at} — for eviction strategies."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT sha256, size, uploaded_at FROM blobs"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def evict(self, sha: str) -> bool:
+        """Delete a blob regardless of uploader (replication-controlled eviction)."""
+        with self._lock:
+            self._conn.execute("DELETE FROM blobs WHERE sha256=?", (sha,))
+            self._conn.commit()
+        try:
+            os.remove(self._path(sha))
+        except FileNotFoundError:
+            pass
+        return True
+
     def descriptor(self, sha: str, base_url: str = "") -> dict:
         """A Blossom blob descriptor (BUD-02)."""
         m = self.meta(sha) or {}
