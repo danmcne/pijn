@@ -109,8 +109,35 @@ class EventStore:
                     self._delete(cur, row["id"])
 
             self._insert(cur, event)
+            if event.kind == 5:
+                self._process_deletion(cur, event)  # NIP-09
             self._conn.commit()
             return True, "stored"
+
+    def _process_deletion(self, cur, event: Event):
+        """NIP-09: a kind-5 event deletes the *same author's* referenced events.
+
+        `e` tags name event ids; `a` tags name addressable coordinates
+        `kind:pubkey:d`. We only delete events whose pubkey matches the deleter,
+        so one pubkey can never delete another's content. The deletion event
+        itself is kept so it propagates."""
+        for eid in event.tag_values("e"):
+            cur.execute("DELETE FROM event_tags WHERE event_id=? AND event_id IN "
+                        "(SELECT id FROM events WHERE id=? AND pubkey=?)",
+                        (eid, eid, event.pubkey))
+            cur.execute("DELETE FROM events WHERE id=? AND pubkey=?", (eid, event.pubkey))
+        for coord in event.tag_values("a"):
+            parts = coord.split(":", 2)
+            if len(parts) != 3:
+                continue
+            kind_s, pk, d = parts
+            if pk != event.pubkey or not kind_s.isdigit():
+                continue  # can't delete another author's events
+            rows = cur.execute(
+                "SELECT id FROM events WHERE pubkey=? AND kind=? AND d_tag=?",
+                (pk, int(kind_s), d)).fetchall()
+            for row in rows:
+                self._delete(cur, row["id"])
 
     def _insert(self, cur, event: Event):
         cur.execute(

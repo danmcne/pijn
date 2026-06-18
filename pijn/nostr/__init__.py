@@ -1,4 +1,9 @@
-"""pijn's Nostr core: keys, events, filters. Pure-Python, no native deps."""
+"""pijn's Nostr core: keys, events, filters.
+
+Signatures use libsecp256k1 (via `coincurve`) and at-rest key encryption uses
+pyca/cryptography — both audited, both shipped as wheels (no build step). Each
+has a pure-Python fallback used only when its wheel is unavailable.
+"""
 
 from .event import (
     ADDRESSABLE,

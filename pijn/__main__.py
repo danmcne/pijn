@@ -271,6 +271,8 @@ def _cmd_sync(args):
         source_relays=policy.relays_read or [policy.relay_public_url],
         default_blossom=policy.blossom_servers or [policy.blossom_public_url],
         storage_total=policy.storage_total, eviction=policy.eviction, meter=meter,
+        blob_max_size=policy.blob_max_size, allow_private=policy.allow_private_sources,
+        transport=policy.transport,
     )
     reports = asyncio.run(controller.sync_all())
     store.close()
@@ -322,12 +324,16 @@ def _cmd_announce(args):
         events.append((f"seed: {site.name}", ev))
 
     async def _go():
+        transport = policy.transport
         out = []
         for label, ev in events:
             results = []
             for url in targets:
+                # Publish to remote relays over the configured transport; a
+                # local relay stays direct (you don't reach 127.0.0.1 via Tor).
+                proxy = transport.proxy_for_url(url)
                 try:
-                    ok, msg = await RelayClient(url).publish(ev)
+                    ok, msg = await RelayClient(url, proxy=proxy).publish(ev)
                 except Exception as e:
                     ok, msg = False, str(e)
                 results.append((url, ok))

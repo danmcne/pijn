@@ -153,6 +153,20 @@ class Policy:
                 "protect_pinned": bool(e.get("protect_pinned", True))}
 
     @property
+    def allow_private_sources(self) -> bool:
+        """If True, the replication SSRF guard is relaxed so network-discovered
+        blob servers/relays on private/loopback addresses are allowed (local
+        testing only). Default False — network-supplied private targets are
+        refused. (`replication.allow_private_sources`)"""
+        return bool((self.raw.get("replication") or {}).get("allow_private_sources", False))
+
+    @property
+    def transport(self):
+        """Parsed `transport:` config (outbound Tor + inbound onion; P4)."""
+        from .transport.config import parse_transport
+        return parse_transport(self.raw.get("transport"))
+
+    @property
     def sites(self) -> list:
         """Parsed `sites:` entries (the replication controller's work list)."""
         from .nostr.bech32 import normalize_pubkey

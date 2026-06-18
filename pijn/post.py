@@ -28,7 +28,7 @@ def _slugify(text: str) -> str:
 
 
 async def publish_post(path: str, keypair: Keypair, relay_url: str, slug: str = "",
-                       title: str = "", summary: str = "", tags=()):
+                       title: str = "", summary: str = "", tags=(), proxy: str | None = None):
     """Publish a Markdown file as a kind-30023 long-form post. Returns a summary."""
     if not os.path.isfile(path):
         raise FileNotFoundError(path)
@@ -47,20 +47,20 @@ async def publish_post(path: str, keypair: Keypair, relay_url: str, slug: str = 
         event_tags.append(["t", t])
 
     event = make_event(KIND_LONGFORM, content=body, tags=event_tags).sign(keypair.seckey_bytes)
-    accepted, message = await RelayClient(relay_url).publish(event)
+    accepted, message = await RelayClient(relay_url, proxy=proxy).publish(event)
     if not accepted:
         raise RuntimeError(f"relay rejected post: {message}")
     return {"npub": keypair.npub, "slug": slug, "title": title, "id": event.id}
 
 
 async def publish_blog(keypair: Keypair, relay_url: str, title: str = "",
-                       description: str = "", identifier: str = ""):
+                       description: str = "", identifier: str = "", proxy: str | None = None):
     """Publish/update the manifest that marks an origin as a blog."""
     manifest = build_manifest(
         paths={}, servers=[], identifier=identifier,
         title=title, description=description, app="blog",
     ).sign(keypair.seckey_bytes)
-    accepted, message = await RelayClient(relay_url).publish(manifest)
+    accepted, message = await RelayClient(relay_url, proxy=proxy).publish(manifest)
     if not accepted:
         raise RuntimeError(f"relay rejected blog manifest: {message}")
     return {"npub": keypair.npub, "identifier": identifier,

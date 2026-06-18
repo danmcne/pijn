@@ -4,6 +4,118 @@ All notable changes to pijn are recorded here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project versions by
 roadmap phase (see [`roadmap.md`](./roadmap.md)).
 
+## [0.4.0] — P4 transport: outbound Tor + cautious inbound onion
+
+Phase 4. Tor is added in two independent halves, with the inbound half
+deliberately read-only-first per the "err on the side of caution" plan: start by
+exposing only the gateway, open the writable ports later. No data-format or
+on-disk changes; existing identities and stores carry over.
+
+### Added
+- **Transport layer** (`pijn/transport/`): a `Transport` config parsed from the
+  policy `transport:` block, a `proxy_url`/`proxy_for_url` helper (loopback
+  targets are never tunnelled; `.onion`/DNS resolve inside Tor via `socks5h`),
+  and a small dependency-free Tor **control-port client** that publishes an
+  ephemeral hidden service via `ADD_ONION`.
+- **Outbound Tor.** `transport.default: direct|tor` routes this node's relay (WS)
+  and Blossom (HTTP) client connections — replication, discovery, and `announce`
+  — through the Tor SOCKS proxy, and can reach `.onion` peers. Overridable per
+  mirrored site with `sites[].transport`. The relay client uses websockets'
+  native SOCKS support; the Blossom client uses `httpx[socks]`.
+- **Inbound hidden service (opt-in, read-only first).**
+  `transport.tor.inbound_onion`:
+  - `off` (default) — no inbound onion.
+  - `gateway` — publish **only** the read-only gateway as an `.onion`.
+  - `all` — additionally expose the writable relay + blob ports (explicit opt-in).
+  The onion is ephemeral (gone on exit). If the Tor control port is unreachable,
+  the daemon logs a warning and continues serving without an onion.
+- README gained a **Privacy & Tor** section; the example policy's `transport:`
+  block documents the SOCKS/control/inbound options.
+
+### Changed
+- `transport.tor.inbound_onion` accepts the strings `off|gateway|all`; the old
+  boolean still works (`true` → `gateway`, `false` → `off`).
+- The publisher (`publish`/`post`/`blog`) continues to write to the **local**
+  node directly — it is a local operation, so it is never tunnelled.
+
+### Dependencies
+- Added `httpx[socks]` (pulls in `socksio`) and `python-socks` for SOCKS support
+  in the HTTP and WebSocket clients. Both are wheels; still no build step.
+  Inbound onion uses Tor's control port directly and needs no extra dependency.
+
+### Not yet exercised
+- A **live Tor round-trip** was not run in the development environment (no Tor
+  daemon there): the SOCKS outbound path and `ADD_ONION` are verified by API/
+  protocol conformance and against a mock control server, not against real Tor.
+  The gateway-first rollout is the intended way to validate it in practice.
+
+## [0.3.4] — hardening pass before P4 (audited crypto, real moderation, SSRF/XSS fixes)
+
+
+A security and correctness pass gating entry to P4. P4 makes the node *reachable*
+(inbound `.onion`), which invalidates the "fine for a local personal node"
+assumption behind several earlier shortcuts — so they are addressed now, before
+any transport code lands. No data-format or on-disk changes; existing identities
+and stores carry over untouched.
+
+### Changed
+- **Cryptography is no longer hand-rolled on the hot path.** Signing and
+  verification now use **libsecp256k1 via `coincurve`** (the audited C library
+  Bitcoin Core uses); the at-rest nsec is sealed with **pyca/cryptography**
+  (ChaCha20-Poly1305 + scrypt). Both ship as pre-built wheels, so there is still
+  **no build step**. The previous pure-Python BIP-340 / ChaCha20-Poly1305 code is
+  retained only as an automatic fallback (`_schnorr_fallback.py`,
+  `_cipher_fallback.py`) used when a wheel is unavailable; it warns on stderr.
+  `schnorr.BACKEND` / `cipher.BACKEND` report which is live. Existing
+  `nsec.enc` files decrypt unchanged (the container format is identical).
+- **Key-encryption container now records and honors its KDF.** v0.3.3 always
+  wrote `kdf: scrypt` but could silently re-derive with a different KDF across
+  environments, risking permanent lockout. The container is now self-describing
+  (`v: 2`) and decrypt re-derives exactly as written; v1 containers still read.
+- **The example moderation default is now `opt-out`** (carry all not explicitly
+  blocked). The prior `opt-in` example with empty allow-lists would, now that
+  moderation is enforced, carry *nothing* — a footgun for anyone copying it.
+
+### Added — security
+- **Moderation is now enforced** (it was parsed but inert in 0.3.x). The relay
+  ingest, Blossom upload, and replication all consult the policy with the SPEC §4
+  precedence (`content.block > content.allow > pubkeys.block > pubkeys.allow >
+  mode`). `warn_on_override` logs when a `content.allow` carries a blocked
+  author's item. (`pijn/moderation.py`)
+- **SSRF guard on network-discovered endpoints** (`pijn/netguard.py`). Blob
+  servers and relays learned from manifests and kind-30888 seeder announcements
+  are refused if they resolve to loopback/private/link-local/reserved addresses.
+  Operator-configured endpoints are trusted and exempt; `.onion` passes (routed
+  over Tor in P4). Relax for local testing with
+  `replication.allow_private_sources: true`.
+- **Markdown XSS fixed.** The long-form renderer's URL filter is now a scheme
+  *allowlist* (`http`/`https`/`mailto`/relative) and strips embedded control
+  characters first, closing `java\tscript:`-style scheme-spoofing that bypassed
+  the old denylist. Also fixed a double-escape that corrupted `&` in URLs.
+- **Gateway security headers.** All served responses carry `X-Content-Type-Options:
+  nosniff` and `Referrer-Policy: no-referrer`; pijn-generated HTML (blog/landing)
+  additionally gets a strict `Content-Security-Policy` (no scripts) and
+  `X-Frame-Options: DENY`; raw author blobs get `X-Frame-Options: SAMEORIGIN`.
+- **Relay ingest guardrails** for when the node becomes reachable: per-connection
+  subscription cap, per-REQ filter cap, a default + maximum query `limit` so a
+  broad `REQ` can't stream the whole store, and rejection of events dated far in
+  the future. (The built-in relay remains a personal-node relay; strfry/khatru
+  still drop in for public nodes.)
+- **Blob hash-name validation** at the HTTP boundary (`^[0-9a-f]{64}$`) as
+  defence-in-depth against path traversal, and a **hard streaming size cap** on
+  replication fetches so a server that under-reports its size in HEAD can't make
+  a mirroring node buffer an unbounded body.
+
+### Added — correctness
+- **NIP-09 deletions** (kind 5) are honored: a deletion removes the *same
+  author's* referenced events (by `e` id and `a` coordinate); it can never
+  delete another pubkey's content.
+- Blog index no longer crashes on a non-numeric `published_at` tag; the relay
+  client skips a malformed inbound `EVENT` instead of aborting the query.
+
+### Dependencies
+- Added `coincurve>=20` and `cryptography>=42` (both wheels; no compiler needed).
+
 ## [0.3.3] — persistent data home + encrypted key at rest
 
 ### Changed

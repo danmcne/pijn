@@ -31,12 +31,13 @@ def _iter_files(directory: str):
 
 
 async def publish_site(directory: str, keypair: Keypair, blossom_url: str,
-                       relay_url: str, identifier: str = "", title: str = ""):
+                       relay_url: str, identifier: str = "", title: str = "",
+                       proxy: str | None = None):
     """Publish `directory` as a site. Returns a summary dict."""
     if not os.path.isdir(directory):
         raise NotADirectoryError(directory)
 
-    blossom = BlossomClient(blossom_url)
+    blossom = BlossomClient(blossom_url, proxy=proxy)
     paths = {}
     for request_path, fs_path in _iter_files(directory):
         with open(fs_path, "rb") as f:
@@ -55,7 +56,7 @@ async def publish_site(directory: str, keypair: Keypair, blossom_url: str,
         paths=paths, servers=[blossom_url], identifier=identifier, title=title
     ).sign(keypair.seckey_bytes)
 
-    accepted, message = await RelayClient(relay_url).publish(manifest)
+    accepted, message = await RelayClient(relay_url, proxy=proxy).publish(manifest)
     if not accepted:
         raise RuntimeError(f"relay rejected manifest: {message}")
 

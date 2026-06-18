@@ -56,8 +56,9 @@ class LocalEventSource:
 class RelayEventSource:
     """Read manifests from one or more remote relays (WebSocket)."""
 
-    def __init__(self, relay_urls: list):
+    def __init__(self, relay_urls: list, proxy: str | None = None):
         self.relay_urls = relay_urls
+        self.proxy = proxy
 
     async def get_manifest(self, pubkey: str, identifier: str = ""):
         from ..client.relay_client import RelayClient
@@ -69,7 +70,7 @@ class RelayEventSource:
         newest = None
         for url in self.relay_urls:
             try:
-                for ev in await RelayClient(url).query(filters):
+                for ev in await RelayClient(url, proxy=self.proxy).query(filters):
                     if newest is None or ev.created_at > newest.created_at:
                         newest = ev
             except Exception:
@@ -82,7 +83,7 @@ class RelayEventSource:
         seen, posts = set(), []
         for url in self.relay_urls:
             try:
-                for ev in await RelayClient(url).query(filters):
+                for ev in await RelayClient(url, proxy=self.proxy).query(filters):
                     if ev.id not in seen:
                         seen.add(ev.id)
                         posts.append(ev)
@@ -102,14 +103,15 @@ class LocalBlobSource:
 
 
 class HttpBlobSource:
-    def __init__(self, default_servers: list):
+    def __init__(self, default_servers: list, proxy: str | None = None):
         self.default_servers = default_servers
+        self.proxy = proxy
 
     async def get(self, sha: str, server_hints=None):
         from ..client.blossom_client import BlossomClient
         for url in list(server_hints or []) + self.default_servers:
             try:
-                return await BlossomClient(url).fetch(sha)
+                return await BlossomClient(url, proxy=self.proxy).fetch(sha)
             except Exception:
                 continue
         return None
@@ -130,7 +132,12 @@ class Resolver:
         self.is_async = is_async
 
     async def resolve(self, pubkey: str, request_path: str, identifier: str = ""):
-        """Return (bytes, content_type) or None if the path is not in the site."""
+        """Resolve a request to `(bytes, content_type, generated)` or None.
+
+        `generated` is True when the bytes are HTML pijn rendered itself (a blog
+        projection) and False when they are a raw, author-supplied blob — the
+        gateway uses it to decide how strict a Content-Security-Policy to apply.
+        """
         if self.is_async:
             event = await self.event_source.get_manifest(pubkey, identifier)
         else:
@@ -155,7 +162,7 @@ class Resolver:
             return None
 
         content_type, _ = mimetypes.guess_type(normalize_request_path(request_path))
-        return data, content_type or "application/octet-stream"
+        return data, content_type or "application/octet-stream", False
 
     async def _resolve_blog(self, pubkey: str, request_path: str, manifest: dict):
         """Project the pubkey's kind-30023 posts into an index + post pages."""
@@ -166,10 +173,10 @@ class Resolver:
 
         path = request_path.split("?", 1)[0].strip("/")
         if path in ("", "index.html"):
-            return blog_render.render_index(manifest, pubkey, posts), "text/html; charset=utf-8"
+            return blog_render.render_index(manifest, pubkey, posts), "text/html; charset=utf-8", True
 
         # Otherwise the path is a post slug (the post's `d` tag).
         for post in posts:
             if post.d_tag == path:
-                return blog_render.render_post(manifest, pubkey, post), "text/html; charset=utf-8"
+                return blog_render.render_post(manifest, pubkey, post), "text/html; charset=utf-8", True
         return None

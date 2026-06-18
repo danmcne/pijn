@@ -104,6 +104,8 @@ Cashu incentive layer; (3) the templates.
   other seeders/relays holding a site.
 - **Exit:** a site stays reachable while its author is offline because others
   seed it.
+- **Status:** done (0.3.x). Hardened in 0.3.4 (enforced moderation; SSRF guard +
+  streaming size cap on pulled blobs).
 
 ### P4 — Transport & privacy
 - **Goal:** Tor as a first-class, visible control.
@@ -112,6 +114,11 @@ Cashu incentive layer; (3) the templates.
   per-site Direct/Tor toggle in the UI, with the slowness warning.
 - **Exit:** one-click anonymous browse + publish. Many relays are already
   `.onion`, so most of this composes for free.
+- **Status:** done in v0.4.0, configured via the policy `transport:` block (no
+  GUI yet). Outbound is per-node and per-site. Inbound is **read-only-first**:
+  `inbound_onion: gateway` exposes only the gateway, `all` adds the write ports.
+  Deferred: Tor control cookie/SAFECOOKIE auth (password/null only for now), and
+  a live-Tor integration test.
 
 ### P5 — Clearweb bridge
 - **Goal:** sites findable on the normal web + search engines.

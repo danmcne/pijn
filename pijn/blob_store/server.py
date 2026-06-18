@@ -13,6 +13,7 @@ auth.py). The server owns bytes only — never events.
 """
 
 import mimetypes
+import re
 
 from fastapi import FastAPI, Header, Request, Response
 from fastapi.responses import JSONResponse
@@ -20,10 +21,20 @@ from fastapi.responses import JSONResponse
 from .auth import verify_auth
 from .storage import BlobStore, sha256_hex
 
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
 
 def _strip_ext(sha_with_ext: str) -> str:
     """`<sha>.png` -> `<sha>`; leave a bare hash untouched."""
-    return sha_with_ext.split(".", 1)[0]
+    return sha_with_ext.split(".", 1)[0].lower()
+
+
+def _valid_sha(sha: str) -> bool:
+    """A blob name must be exactly a 64-char lowercase hex sha256. Validating at
+    the boundary is defence-in-depth against any path-traversal attempt (the DB
+    metadata gate already blocks unknown names, but we don't want to rely on it
+    alone)."""
+    return bool(_SHA256_RE.match(sha))
 
 
 def _guess_type(stored_type: str, sha_with_ext: str) -> str:
@@ -33,7 +44,8 @@ def _guess_type(stored_type: str, sha_with_ext: str) -> str:
     return guessed or "application/octet-stream"
 
 
-def build_blob_app(store: BlobStore, public_url: str = "", max_size: int = 0) -> FastAPI:
+def build_blob_app(store: BlobStore, public_url: str = "", max_size: int = 0,
+                   moderation=None) -> FastAPI:
     app = FastAPI(title="pijn blossom")
     app.state.store = store
 
@@ -56,6 +68,10 @@ def build_blob_app(store: BlobStore, public_url: str = "", max_size: int = 0) ->
         pubkey = verify_auth(authorization, "upload", sha)
         if pubkey is None:
             return JSONResponse({"message": "unauthorized"}, status_code=401)
+        # Moderation: a "knowing operator" refuses content their policy excludes,
+        # by uploader pubkey or by exact blob hash (SPEC §4).
+        if moderation is not None and not moderation.accepts_blob(sha, pubkey):
+            return JSONResponse({"message": "blocked by operator policy"}, status_code=403)
         descriptor = store.put(
             data, content_type=request.headers.get("content-type", ""), pubkey=pubkey
         )
@@ -69,6 +85,8 @@ def build_blob_app(store: BlobStore, public_url: str = "", max_size: int = 0) ->
     @app.api_route("/{sha_with_ext}", methods=["GET", "HEAD"])
     async def fetch(sha_with_ext: str, request: Request):
         sha = _strip_ext(sha_with_ext)
+        if not _valid_sha(sha):
+            return Response(status_code=404)
         meta = store.meta(sha)
         if meta is None or not store.has(sha):
             return Response(status_code=404)
@@ -83,6 +101,8 @@ def build_blob_app(store: BlobStore, public_url: str = "", max_size: int = 0) ->
     @app.delete("/{sha}")
     async def delete(sha: str, authorization: str = Header(default="")):
         sha = _strip_ext(sha)
+        if not _valid_sha(sha):
+            return JSONResponse({"message": "invalid sha"}, status_code=400)
         pubkey = verify_auth(authorization, "delete", sha)
         if pubkey is None:
             return JSONResponse({"message": "unauthorized"}, status_code=401)

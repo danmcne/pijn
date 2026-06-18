@@ -50,6 +50,31 @@ def _label_pubkey(label: str):
         return None
 
 
+def _security_headers(generated: bool) -> dict:
+    """Baseline hardening headers for everything the gateway serves.
+
+    `nosniff` stops a non-HTML blob being re-interpreted as HTML; the others
+    blunt clickjacking and referrer leakage. For pijn-*generated* HTML (blog
+    pages) we can also impose a strict CSP that forbids scripts outright —
+    defence-in-depth behind the Markdown sanitizer. We do *not* impose a
+    script CSP on raw author blobs, since legitimate static sites ship their
+    own JS; per-npub origin isolation is their boundary.
+    """
+    h = {
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+    }
+    if generated:
+        h["X-Frame-Options"] = "DENY"
+        h["Content-Security-Policy"] = (
+            "default-src 'none'; img-src * data: blob:; style-src 'unsafe-inline'; "
+            "font-src *; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+        )
+    else:
+        h["X-Frame-Options"] = "SAMEORIGIN"
+    return h
+
+
 def build_gateway_app(resolver) -> FastAPI:
     app = FastAPI(title="pijn gateway")
     app.state.resolver = resolver
@@ -58,8 +83,9 @@ def build_gateway_app(resolver) -> FastAPI:
         result = await resolver.resolve(pubkey, path, identifier)
         if result is None:
             return Response("not found", status_code=404)
-        data, content_type = result
-        return Response(content=data, media_type=content_type)
+        data, content_type, generated = result
+        return Response(content=data, media_type=content_type,
+                        headers=_security_headers(generated))
 
     @app.middleware("http")
     async def subdomain_router(request: Request, call_next):
@@ -82,7 +108,7 @@ def build_gateway_app(resolver) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def landing():
-        return _LANDING
+        return HTMLResponse(_LANDING, headers=_security_headers(generated=True))
 
     # --- legacy path scheme: redirect to the canonical per-site origin ---------
 

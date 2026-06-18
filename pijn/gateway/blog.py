@@ -72,12 +72,23 @@ def _post_title(post) -> str:
     return post.first_tag("title") or post.d_tag or "untitled"
 
 
+def _post_ts(post) -> int:
+    """Sort key: published_at if it's a clean integer, else created_at, else 0.
+    Guards against a malformed `published_at` tag crashing the index render."""
+    raw = post.first_tag("published_at")
+    if raw and str(raw).isdigit():
+        return int(raw)
+    try:
+        return int(post.created_at or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def render_index(meta: dict, pubkey: str, posts: list) -> bytes:
     """Render the blog landing page: title, byline, and a list of posts."""
     title = meta.get("title") or "Blog"
     items = []
-    for p in sorted(posts, key=lambda e: int(e.first_tag("published_at") or e.created_at or 0),
-                    reverse=True):
+    for p in sorted(posts, key=_post_ts, reverse=True):
         slug = p.d_tag
         if not slug:
             continue  # an addressable post with no d-tag has no stable URL

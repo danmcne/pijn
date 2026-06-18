@@ -25,12 +25,33 @@ _QUOTE = re.compile(r"^>\s?(.*)$")
 _FENCE = re.compile(r"^```")
 
 
+# All control chars and spaces. Browsers strip these *before* parsing a URL
+# scheme, so "java\tscript:" would execute despite a naive "startswith" check —
+# we remove them entirely so the scheme test sees the real scheme.
+_URL_CTRL = re.compile(r"[\x00-\x20\x7f-\x9f]")
+# Scheme allowlist (not a denylist): only these absolute schemes are emitted;
+# anything else with a scheme is dropped. Relative/anchor/protocol-relative URLs
+# have no scheme and so cannot be javascript:/data:/vbscript:.
+_ALLOWED_SCHEMES = ("http://", "https://", "mailto:")
+
+
 def _safe_url(url: str) -> str:
-    """Escape a URL for an attribute and neutralize dangerous schemes."""
-    low = url.strip().lower()
-    if low.startswith(("javascript:", "data:", "vbscript:")):
+    """Make a URL safe for an HTML attribute: allow only known-safe schemes.
+
+    Uses an allowlist rather than blocking specific dangerous schemes, and
+    strips embedded control characters first so scheme-spoofing tricks like
+    `java\\tscript:` cannot slip through.
+    """
+    cleaned = _URL_CTRL.sub("", url)
+    low = cleaned.lower()
+    # Is there a scheme (a ':' before the first '/')? If so, require an allowed
+    # one; if not, it's a relative/anchor URL and is safe.
+    if ":" in low.split("/", 1)[0] and not low.startswith(_ALLOWED_SCHEMES):
         return "#"
-    return html.escape(url.strip(), quote=True)
+    # The surrounding inline text was already html.escape(quote=False)'d, so
+    # &/</> are handled; finish attribute-safety by escaping quotes only, to
+    # avoid double-escaping '&' (which would corrupt query strings).
+    return cleaned.replace('"', "&quot;").replace("'", "&#x27;")
 
 
 def _inline(text: str) -> str:

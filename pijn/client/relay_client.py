@@ -17,12 +17,13 @@ from ..nostr.event import Event
 
 
 class RelayClient:
-    def __init__(self, url: str):
+    def __init__(self, url: str, proxy: str | None = None):
         self.url = url
+        self.proxy = proxy  # e.g. "socks5h://127.0.0.1:9050" to route over Tor
 
     async def publish(self, event: Event, timeout: float = 10) -> tuple[bool, str]:
         """Send one EVENT and return the relay's (accepted, message) from OK."""
-        async with websockets.connect(self.url) as ws:
+        async with websockets.connect(self.url, proxy=self.proxy) as ws:
             await ws.send(json.dumps(["EVENT", event.to_dict()]))
             while True:
                 try:
@@ -42,7 +43,7 @@ class RelayClient:
         never sends EOSE can't hang the caller forever.
         """
         out = []
-        async with websockets.connect(self.url) as ws:
+        async with websockets.connect(self.url, proxy=self.proxy) as ws:
             await ws.send(json.dumps(["REQ", sub_id, *filters]))
             while True:
                 try:
@@ -50,7 +51,10 @@ class RelayClient:
                 except asyncio.TimeoutError:
                     break
                 if msg[0] == "EVENT" and msg[1] == sub_id:
-                    out.append(Event.from_dict(msg[2]))
+                    try:
+                        out.append(Event.from_dict(msg[2]))
+                    except (KeyError, IndexError, TypeError):
+                        continue  # skip a malformed event rather than abort the query
                 elif msg[0] == "EOSE" and msg[1] == sub_id:
                     await ws.send(json.dumps(["CLOSE", sub_id]))
                     break

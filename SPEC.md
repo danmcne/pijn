@@ -286,3 +286,53 @@ impersonation-proof at once. pijn's choice:
 Consequence: impersonation is *not* prevented (anyone can mint an npub and type
 any display name) but is made to not *stick* — it carries no domain vouch and no
 graph weight. This is a polycentric, reputation-based order, not a registrar.
+
+---
+
+## 8. Implementation notes since P0 (v0.3.4)
+
+The architecture in §1–§7 is unchanged. This section records where the *built*
+node went beyond "parsed but inert," so the spec and the code agree.
+
+- **Cryptography backends.** §1 pins identity to secp256k1/Schnorr (BIP-340) but
+  not to an implementation. The node uses **libsecp256k1 via `coincurve`** for
+  signing/verification and **pyca/cryptography** (ChaCha20-Poly1305 + scrypt) for
+  the at-rest nsec — both audited and shipped as wheels, preserving the no-build
+  constraint. Pure-Python implementations remain as automatic fallbacks only.
+- **Moderation (§4) is enforced**, not just parsed. The precedence list in §4 is
+  applied at three points: relay event ingest, Blossom upload, and replication.
+  Default when no `moderation:` block is present is `opt-out` (carry all),
+  so the feature is opt-in and back-compatible.
+- **Seeder discovery (D4) is guarded.** Because kind-30888 announcements and
+  manifest `server` hints are untrusted network input, the replication
+  controller passes every *discovered* blob-server/relay URL through an SSRF
+  filter that refuses loopback/private/link-local/reserved targets (`.onion`
+  exempt; operator-configured endpoints exempt). Toggle for local testing with
+  `replication.allow_private_sources`.
+- **Reachability hardening (pre-P4).** Since P4 exposes the node, the built-in
+  relay now caps subscriptions/filters per connection, imposes a default and
+  maximum query `limit`, and rejects far-future-dated events; the Blossom server
+  validates the sha256 path shape; replication fetches are size-capped while
+  streaming (HEAD sizes are advisory only). A public, high-throughput node still
+  swaps in strfry/khatru per the §5 decision.
+- **NIP-09 deletes** (referenced in §1) are honored by the event-store: a kind-5
+  event deletes the *same author's* referenced events only.
+
+### Transport (P4, v0.4.0)
+
+The §1 "transport" row (Direct / Tor) is realized in `pijn/transport/`:
+
+- **Outbound** is per-connection. `transport.default` (and per-site
+  `sites[].transport`) selects `direct` or `tor`; `tor` routes the relay (WS) and
+  Blossom (HTTP) clients through the SOCKS proxy using `socks5h`, so hostnames and
+  `.onion` resolve inside Tor. Loopback targets are never tunnelled, so a node
+  always reaches its own services directly. Publishing writes to the local node
+  and is therefore direct.
+- **Inbound** is opt-in and staged, narrower than the §4 schema's original
+  boolean. `transport.tor.inbound_onion` is `off | gateway | all`: `gateway`
+  exposes only the read-only projection as an ephemeral hidden service; `all`
+  also exposes the writable relay/blob ports. This is the cautious realization of
+  "reachable over Tor" — read-only first, write surfaces only on explicit
+  opt-in. The onion is created over the Tor control port (`ADD_ONION`) and torn
+  down on exit. Cookie/SAFECOOKIE control auth is not yet implemented; a control
+  password (or an open control port) is required for inbound.

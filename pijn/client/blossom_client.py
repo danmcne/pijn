@@ -29,8 +29,9 @@ def _auth_header(keypair: Keypair, verb: str, sha: str, ttl: int = 300) -> str:
 
 
 class BlossomClient:
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, proxy: str | None = None):
         self.base_url = base_url.rstrip("/")
+        self.proxy = proxy  # e.g. "socks5h://127.0.0.1:9050" to route over Tor
 
     async def upload(self, data: bytes, keypair: Keypair, content_type: str = "") -> dict:
         """Upload bytes; return the server's blob descriptor."""
@@ -39,14 +40,14 @@ class BlossomClient:
             "authorization": _auth_header(keypair, "upload", sha),
             "content-type": content_type or "application/octet-stream",
         }
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, proxy=self.proxy) as client:
             resp = await client.put(f"{self.base_url}/upload", content=data, headers=headers)
             resp.raise_for_status()
             return resp.json()
 
     async def head(self, sha: str) -> int | None:
         """Return the blob's size in bytes via HEAD, or None if unavailable."""
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=15, proxy=self.proxy) as client:
             try:
                 resp = await client.head(f"{self.base_url}/{sha}")
             except httpx.HTTPError:
@@ -56,11 +57,26 @@ class BlossomClient:
         cl = resp.headers.get("content-length")
         return int(cl) if cl and cl.isdigit() else None
 
-    async def fetch(self, sha: str) -> bytes:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(f"{self.base_url}/{sha}")
-            resp.raise_for_status()
-            data = resp.content
+    async def fetch(self, sha: str, max_bytes: int = 0) -> bytes:
+        """Download a blob and verify its bytes hash to `sha`.
+
+        Streams the body and aborts once `max_bytes` is exceeded (0 = no cap),
+        so a server that under-reports its size in a HEAD cannot make us buffer
+        an unbounded response into memory — the size used for cap/budget
+        decisions is advisory; this is the hard backstop.
+        """
+        async with httpx.AsyncClient(timeout=30, proxy=self.proxy) as client:
+            async with client.stream("GET", f"{self.base_url}/{sha}") as resp:
+                resp.raise_for_status()
+                chunks, total = [], 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if max_bytes and total > max_bytes:
+                        raise ValueError(
+                            f"blob from {self.base_url} exceeds max size {max_bytes}"
+                        )
+                    chunks.append(chunk)
+        data = b"".join(chunks)
         # Content-addressed integrity: a blob is only trustworthy if its bytes
         # hash to the name we asked for. Without this check, a malicious or
         # buggy Blossom server could serve arbitrary bytes for any hash — the

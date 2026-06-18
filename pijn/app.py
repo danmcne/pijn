@@ -55,9 +55,11 @@ def build_node(policy: Policy, only: str | None = None) -> Node:
 
     if wanted("blob_store", bs.enabled):
         node.blob_store = BlobStore(bs.path)
+        from .moderation import Moderation
         node.apps["blob_store"] = (
             build_blob_app(node.blob_store, policy.blossom_public_url,
-                           max_size=policy.blob_max_size),
+                           max_size=policy.blob_max_size,
+                           moderation=Moderation.from_policy(policy)),
             bs.host, bs.port,
         )
 
@@ -68,9 +70,10 @@ def build_node(policy: Policy, only: str | None = None) -> Node:
                 LocalEventSource(node.store), LocalBlobSource(node.blob_store), is_async=False,
             )
         else:
+            _proxy = policy.transport.proxy_url()
             resolver = Resolver(
-                RelayEventSource(policy.relays_read or [policy.relay_public_url]),
-                HttpBlobSource(policy.blossom_servers or [policy.blossom_public_url]),
+                RelayEventSource(policy.relays_read or [policy.relay_public_url], proxy=_proxy),
+                HttpBlobSource(policy.blossom_servers or [policy.blossom_public_url], proxy=_proxy),
                 is_async=True,
             )
         node.apps["gateway"] = (build_gateway_app(resolver), gw.host, gw.port)
@@ -107,7 +110,56 @@ def build_controller(policy: Policy, node: Node):
         source_relays=policy.relays_read or [policy.relay_public_url],
         default_blossom=policy.blossom_servers or [policy.blossom_public_url],
         storage_total=policy.storage_total, eviction=policy.eviction, meter=meter,
+        blob_max_size=policy.blob_max_size, allow_private=policy.allow_private_sources,
+        transport=policy.transport,
     )
+
+
+def _start_onion(policy: Policy, node: "Node"):
+    """If inbound onion is enabled, publish the node's services as a hidden
+    service and return the live OnionService (kept open to hold the onion).
+
+    Cautious by default: only the read-only gateway is exposed unless the policy
+    explicitly sets `transport.tor.inbound_onion: all`, which also exposes the
+    writable relay and blob ports.
+    """
+    t = policy.transport
+    if not t.inbound_enabled:
+        return None
+    from .transport import OnionService, reachable
+
+    if not reachable(t.control_host, t.control_port):
+        print(f"pijn: inbound onion requested but Tor control port "
+              f"{t.control_host}:{t.control_port} is unreachable — skipping. "
+              f"Is Tor running with an open ControlPort?")
+        return None
+
+    # Map onion virtports onto the local services we're willing to expose.
+    ports = {}
+    gw = node.apps.get("gateway")
+    if gw is not None:
+        ports[80] = f"127.0.0.1:{gw[2]}"                 # read-only projection
+    if t.expose_write_services:                          # opt-in: `inbound: all`
+        es, bs = node.apps.get("event_store"), node.apps.get("blob_store")
+        if es is not None:
+            ports[es[2]] = f"127.0.0.1:{es[2]}"          # relay (write surface)
+        if bs is not None:
+            ports[bs[2]] = f"127.0.0.1:{bs[2]}"          # blob store (write surface)
+    if not ports:
+        return None
+
+    try:
+        onion = OnionService(t.control_host, t.control_port, t.control_password)
+        addr = onion.create(ports)
+    except Exception as e:
+        print(f"pijn: failed to publish hidden service ({e}); continuing without inbound onion")
+        return None
+
+    scope = "gateway only (read-only)" if not t.expose_write_services else "gateway + relay + blob"
+    print(f"pijn: hidden service up — http://{addr}/  [{scope}]")
+    for vp, target in sorted(ports.items()):
+        print(f"        onion:{vp} -> {target}")
+    return onion
 
 
 def run(policy: Policy, only: str | None = None):
@@ -122,8 +174,11 @@ def run(policy: Policy, only: str | None = None):
     if controller is not None:
         names += f" | mirroring {len(policy.sites)} site(s)"
     print(f"pijn node up — {names}")
+    onion = _start_onion(policy, node)
     try:
         asyncio.run(_serve_all(node, controller))
     finally:
+        if onion is not None:
+            onion.close()
         if node.store:
             node.store.close()

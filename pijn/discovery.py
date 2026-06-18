@@ -42,7 +42,7 @@ def relays_from_event(event) -> dict:
     return {"read": read, "write": write}
 
 
-async def discover_relays(pubkey: str, seed_relays: list, want: str = "write") -> list:
+async def discover_relays(pubkey: str, seed_relays: list, want: str = "write", proxy=None) -> list:
     """Find a pubkey's relays via its newest kind-10002 across `seed_relays`.
 
     `want='write'` returns the author's outbox relays — where to look for the
@@ -51,7 +51,7 @@ async def discover_relays(pubkey: str, seed_relays: list, want: str = "write") -
     newest = None
     for url in seed_relays:
         try:
-            events = await RelayClient(url).query(
+            events = await RelayClient(url, proxy=proxy).query(
                 [{"authors": [pubkey], "kinds": [KIND_RELAY_LIST], "limit": 1}])
         except Exception:
             continue
@@ -94,7 +94,7 @@ def build_seed_announcement(site_kind: int, author_pubkey: str, identifier: str,
     return make_event(KIND_SEED, content="", tags=tags)
 
 
-async def discover_seeders(coord: str, relays: list) -> list:
+async def discover_seeders(coord: str, relays: list, proxy=None) -> list:
     """Find nodes announcing they seed the site `coord`.
 
     Returns [{'pubkey', 'servers', 'relays'}] from verified announcements — the
@@ -104,7 +104,7 @@ async def discover_seeders(coord: str, relays: list) -> list:
     seen, out = set(), []
     for url in relays:
         try:
-            events = await RelayClient(url).query(
+            events = await RelayClient(url, proxy=proxy).query(
                 [{"kinds": [KIND_SEED], "#a": [coord], "limit": 100}])
         except Exception:
             continue

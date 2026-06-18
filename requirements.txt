@@ -1,8 +1,18 @@
-# pijn runtime dependencies — all ship as wheels, so there is no build step.
-# Crypto (BIP-340 Schnorr, bech32, sha256) is pure-Python and vendored, so there
-# is no native crypto dependency.
+# pijn runtime dependencies — all ship as pre-built wheels, so there is no
+# build step (no compiler needed).
 fastapi>=0.110
 uvicorn[standard]>=0.27   # brings the websockets server + client used by the relay
 pyyaml>=6.0               # policy file
 httpx>=0.26               # Blossom HTTP client
 websockets>=12.0          # relay WebSocket client (explicit, not just transitive)
+
+# Cryptography: audited, industry-standard libraries (not hand-rolled).
+coincurve>=20             # libsecp256k1 bindings — BIP-340 Schnorr signing/verify
+cryptography>=42          # ChaCha20-Poly1305 + scrypt for the at-rest nsec
+# A pure-Python fallback for each is vendored and used only when its wheel is
+# unavailable (it warns on stderr); production always uses the libraries above.
+
+# Transport (P4): SOCKS support so relay (WS) + Blossom (HTTP) clients can route
+# over Tor. Inbound hidden services use Tor's control port directly (no extra dep).
+httpx[socks]>=0.26        # pulls in socksio for HTTP-over-SOCKS
+python-socks>=2.0         # SOCKS proxy support for the websockets client

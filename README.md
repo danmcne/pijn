@@ -1,20 +1,25 @@
 # pijn
 
+*pijn — pijn is just nostr.*
+
 **A self-hostable decentralized web where identities own signed content, users
 choose how much of the network they support, and a "website" is just one way of
 rendering that content.** Built *on* Nostr, not beside it.
 
-> **Status:** v0.3.3 — P3 complete, now with all data under `~/.pijn/<npub>/`
-> (survives reinstalls) and the **nsec encrypted at rest** (vendored
-> ChaCha20-Poly1305 + scrypt; daemon runs without it). On top of P2 (per-site
-> origins; templated `static`/`blog` publisher), a **replication controller**
-> mirrors others' sites, discovers their relays and seeders (NIP-65 + kind-30888,
-> `pijn announce`), and keeps a site reachable when its **author** is offline —
-> with `pin`, `storage_cap`, eviction, and bandwidth budgets. Next is P4
-> (transport: Direct/Tor). See
-> [`SPEC.md`](./SPEC.md) for the frozen architecture,
-> [`roadmap.md`](./roadmap.md) for the full plan, and [`CHANGELOG.md`](./CHANGELOG.md)
-> for what landed in each phase.
+> Pijn is plumbing for Nostr content, not a new network.
+
+> **Status:** v0.4.0 — **P4 (transport) is in, the cautious way.** Outbound
+> connections (replication, discovery, announce) can route over **Tor** (SOCKS),
+> per node or per mirrored site, and reach `.onion` peers; local targets always
+> stay direct. Inbound is **opt-in and read-only first**: a node can publish
+> *only* its gateway as a hidden service (`inbound_onion: gateway`), with the
+> writable relay/blob ports exposed solely under an explicit `all`. This builds
+> on v0.3.4's hardening — **audited cryptography** (libsecp256k1 via `coincurve`;
+> at-rest nsec via pyca/`cryptography`), **enforced moderation**, and the
+> **Markdown-XSS / replication-SSRF** fixes. No on-disk changes — existing
+> identities and stores carry over. See [`CHANGELOG.md`](./CHANGELOG.md) for the
+> full list, [`SPEC.md`](./SPEC.md) for the frozen architecture, and
+> [`roadmap.md`](./roadmap.md) for the plan.
 
 ---
 
@@ -54,9 +59,34 @@ the same events render in any NIP-23 client too.
 | Payments | NIP-57 zaps (Lightning) · Cashu NIP-87/60/61 |
 | Rendering | local resolver → `localhost`; clearweb via njump |
 
-**Genuinely new surface is only three things:** the unified node packaging +
-user-controlled replication policy, the partial-seeding/mirroring logic plus the
-Cashu incentive layer, and the templates. Everything else is *adopt the spec*.
+**Where pijn fits — honestly, in both directions.** No single component here is
+unprecedented, and pijn says so: deploying a static site to Blossom + relays is
+what [nsyte](https://github.com/sandwichfarm/nsyte) does (down to the same
+`<npub>.localhost` resolver scheme), and "one box that is a relay **and** a
+Blossom server" is what HAVEN, HORNET Storage, and Route96 already are. The
+publishing tools and templates are *convenience*, not a moat — and pretending
+otherwise would be dishonest.
+
+But the *combination* is what's missing from the ecosystem. Nobody else puts
+**all** of this behind one identity and one policy file: publish a site/blog,
+run your own relay + Blossom, **and** choose — per site, in one YAML — to mirror
+*other people's* whole sites and keep them reachable when the author is offline,
+with storage caps, eviction, bandwidth budgets, knowing moderation, and (P7)
+Cashu paid pinning, all reachable over Tor. Blossom's own mirroring is
+*publisher-push* (you replicate your own blobs); pijn is *seeder-pull-by-policy*
+(I choose to keep your site alive). That user-controlled, third-party seeding
+layer is the part no one has really built.
+
+The closest ancestors are the older "permanent web" systems, and the contrast is
+the point. **ZeroNet** is essentially abandoned. **Freenet/Hyphanet** and
+**GNUnet** are alive but notoriously hard to actually *find* working content or
+peers on, and — crucially — they decide for you what your node stores (content
+is scattered/encrypted across the swarm by the protocol). pijn inverts that last
+property: **you** decide exactly what you carry, by npub and by item, and you can
+always answer "I won't host that." It also doesn't bootstrap a lonely new
+network — it rides the populated Nostr/Blossom one, which is what sank the
+cold-start projects above. So: modest about the pieces, but as a *whole*, pijn is
+trying to occupy a space nothing else currently does.
 
 ## Node architecture
 
@@ -82,10 +112,14 @@ and honoring bandwidth budgets.
 - **Honest persistence.** Content lives iff someone seeds it. Paid pinning
   (Cashu) is the escape valve for content lacking organic seeders.
 - **Knowing, accountable operators.** No blind/encrypted-unknowable storage in
-  v1. Moderation is layered and always *knowing*: an opt-in/opt-out base, npub
-  allow/block lists, and per-item overrides — carry one piece you like even if its
-  author isn't whitelisted, or is blacklisted (the latter with a warning). "I
-  won't carry that," at any granularity.
+  v1. Moderation is layered, always *knowing*, and **enforced** (as of v0.3.4) on
+  what this node ingests, accepts as an upload, and replicates: an opt-in/opt-out
+  base, npub allow/block lists, and per-item overrides — carry one piece you like
+  even if its author isn't whitelisted, or is blacklisted (the latter with a
+  warning). "I won't carry that," at any granularity.
+- **Audited crypto, no build step.** Signatures use libsecp256k1 (`coincurve`);
+  the at-rest key uses pyca/`cryptography`. Both are wheels — no compiler — with
+  a pure-Python fallback only for platforms lacking one.
 - **House stack.** FastAPI + SQLite + vanilla JS. No npm, no build step,
   local-first. Templates are static + vanilla JS.
 
@@ -271,13 +305,52 @@ Your `nsec` never enters the policy file or any server — it lives encrypted in
 `~/.pijn/<npub>/nsec.enc`, is read only to sign, and is decrypted into memory only
 when you run a signing command.
 
-## Roadmap at a glance
+### Privacy & Tor (P4)
+
+Tor is wired in two independent halves; you can use either, both, or neither.
+Both assume a Tor daemon you run yourself (default SOCKS `127.0.0.1:9050`).
+
+**Outbound — hide your IP, reach `.onion` peers.** Set `transport.default: tor`
+to route this node's *outbound* relay/blob connections (replication, discovery,
+`announce`) through Tor; override per mirrored site with `sites[].transport:
+direct|tor`. Local `127.0.0.1` targets are never tunnelled. Hostnames (including
+`.onion`) resolve inside Tor (`socks5h`), so your resolver never sees them.
+
+```yaml
+transport:
+  default: tor
+  tor: { socks: "127.0.0.1:9050" }
+sites:
+  - { name: a-blog, pubkey: npub1..., identifier: blog, transport: tor }
+```
+
+**Inbound — be reachable as a hidden service, cautiously.** This is opt-in and
+**read-only first**. `inbound_onion: gateway` publishes *only* your gateway as an
+`.onion` (people can browse the sites you serve; nobody can write to you). Once
+you're satisfied it works, `inbound_onion: all` additionally exposes the writable
+relay and blob ports. Inbound needs Tor's **control port** open (set a
+`HashedControlPassword` in your `torrc` and put the password in
+`tor.control_password`); if the control port is unreachable, pijn logs a warning
+and keeps serving without an onion.
+
+```yaml
+transport:
+  tor:
+    control: "127.0.0.1:9051"
+    control_password: "…"        # matches torrc HashedControlPassword
+    inbound_onion: gateway        # read-only; use `all` only when you trust the setup
+```
+
+On startup the daemon prints the `.onion` address and the port mapping. The
+service is *ephemeral* — it exists only while the node runs and disappears on
+exit, leaving nothing behind.
+
 
 `P0` spec → `P1` node skeleton (relay + Blossom + resolver) → `P2` publishing
-tools + static/blog templates → `P3` replication & seeding → `P4` Tor →
-`P5` clearweb bridge → `P6` forum → wiki → shop (+ Cashu, NIP-57 zaps) →
-`P7` tipping authors/hosts, paid pinning, escrow, chunk-level swarm. Full detail
-in [`roadmap.md`](./roadmap.md).
+tools + static/blog templates → `P3` replication & seeding → **`P4` transport
+(Tor) — done** → `P5` clearweb bridge → `P6` forum → wiki → shop (+ Cashu,
+NIP-57 zaps) → `P7` tipping authors/hosts, paid pinning, escrow, chunk-level
+swarm. Full detail in [`roadmap.md`](./roadmap.md).
 
 ## Repository layout
 
@@ -287,7 +360,7 @@ pijn/
 ├── SPEC.md               # architecture spec (what's frozen)
 ├── README.md             # you are here
 ├── CHANGELOG.md          # what landed in each phase
-├── requirements.txt      # pure-wheel deps; no build step
+├── requirements.txt      # wheel-only deps (incl. coincurve, cryptography); no build step
 ├── policy.example.yaml   # policy template (SPEC §4)
 ├── examplesite/          # a tiny static site for the publish demo
 └── pijn/                 # the daemon package
@@ -302,15 +375,21 @@ pijn/
     ├── discovery.py      # P3: NIP-65 relay discovery + seeder announce/discovery
     ├── eviction.py       # P3: storage-cap eviction strategies (manual/lru/popularity)
     ├── bandwidth.py      # P3: persisted daily/monthly download budget
-    ├── nostr/            # pure-Python core: schnorr, bech32, keys, events,
+    ├── moderation.py     # SPEC §4 accept/refuse, enforced on ingest + replication
+    ├── netguard.py       # SSRF guard for network-discovered blob servers/relays
+    ├── nostr/            # Nostr core: schnorr (libsecp256k1 via coincurve, with
+    │                     #   a pure-Python fallback), bech32, keys, events,
     │                     #   filters, nsite manifests, nip05, display, cipher
-    │                     #   (ChaCha20-Poly1305 for the encrypted nsec)
+    │                     #   (pyca/cryptography ChaCha20-Poly1305 for the nsec)
     ├── event_store/      # SQLite persistence + NIP-01 WebSocket relay
     ├── blob_store/       # content-addressed storage + Blossom HTTP + 24242 auth
-    ├── client/           # outbound relay (WS) + Blossom (HTTP) clients
+    ├── client/           # outbound relay (WS) + Blossom (HTTP) clients (SOCKS-aware)
+    ├── transport/        # P4: outbound Tor (SOCKS) + inbound hidden service
+    │                     #   (config.py selection; tor.py control-port ADD_ONION)
     └── gateway/          # resolver + per-site-origin renderer; blog projection
                           #   (blog.py) and a safe Markdown subset (markdown.py)
 ```
 
-`transport/` (Direct/Tor) arrives in P4. Active eviction, bandwidth budgets, and
-seeder discovery finish P3 in 0.3.x.
+Active eviction, bandwidth budgets, and seeder discovery finished P3 in 0.3.x;
+audited crypto + enforced moderation + the XSS/SSRF fixes landed in 0.3.4;
+transport (outbound Tor + cautious inbound onion) landed in 0.4.0.

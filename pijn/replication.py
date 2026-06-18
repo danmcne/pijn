@@ -28,6 +28,7 @@ from . import eviction as eviction_strategy
 from .client.blossom_client import BlossomClient
 from .client.relay_client import RelayClient
 from .discovery import discover_relays, discover_seeders, site_coord
+from .netguard import filter_safe
 from .nostr.nsite import (
     KIND_LEGACY,
     KIND_LONGFORM,
@@ -39,7 +40,8 @@ from .nostr.nsite import (
 
 class ReplicationController:
     def __init__(self, store, blob_store, sites, source_relays,
-                 default_blossom, storage_total=0, eviction=None, meter=None):
+                 default_blossom, storage_total=0, eviction=None, meter=None,
+                 blob_max_size=0, allow_private=False, transport=None):
         self.store = store                      # local EventStore (write target)
         self.blob_store = blob_store            # local BlobStore (write target)
         self.sites = sites                      # list[SiteConfig]
@@ -48,16 +50,22 @@ class ReplicationController:
         self.storage_total = storage_total
         self.eviction = eviction or {"policy": "manual", "protect_pinned": True}
         self.meter = meter                      # BandwidthMeter or None (unlimited)
+        self.blob_max_size = blob_max_size      # hard per-blob download ceiling (0 = none)
+        self.allow_private = allow_private      # relax the SSRF guard (local testing)
+        if transport is None:
+            from .transport.config import Transport
+            transport = Transport()
+        self.transport = transport              # outbound Tor selection (per site)
         self._node_bytes = blob_store.total_bytes() if blob_store else 0
 
     # --- relay/blob helpers --------------------------------------------------
 
-    async def _pull_newest(self, filters, relays):
+    async def _pull_newest(self, filters, relays, proxy=None):
         """Query every relay; return the newest valid, matching event."""
         newest = None
         for url in relays:
             try:
-                events = await RelayClient(url).query(filters)
+                events = await RelayClient(url, proxy=proxy).query(filters)
             except Exception:
                 continue
             for ev in events:
@@ -65,11 +73,11 @@ class ReplicationController:
                     newest = ev
         return newest
 
-    async def _pull_all(self, filters, relays):
+    async def _pull_all(self, filters, relays, proxy=None):
         seen, out = set(), []
         for url in relays:
             try:
-                events = await RelayClient(url).query(filters)
+                events = await RelayClient(url, proxy=proxy).query(filters)
             except Exception:
                 continue
             for ev in events:
@@ -78,17 +86,19 @@ class ReplicationController:
                     out.append(ev)
         return out
 
-    async def _blob_size(self, sha, sources):
+    async def _blob_size(self, sha, sources, proxy=None):
         for url in sources:
-            size = await BlossomClient(url).head(sha)
+            size = await BlossomClient(url, proxy=proxy).head(sha)
             if size is not None:
                 return size
         return None
 
-    async def _fetch_blob(self, sha, sources):
+    async def _fetch_blob(self, sha, sources, proxy=None):
         for url in sources:
             try:
-                return await BlossomClient(url).fetch(sha)  # hash-verified inside
+                # max_bytes is the hard backstop against a server that
+                # under-reports its size in HEAD (see BlossomClient.fetch).
+                return await BlossomClient(url, proxy=proxy).fetch(sha, max_bytes=self.blob_max_size)
             except Exception:
                 continue
         return None
@@ -102,9 +112,16 @@ class ReplicationController:
                   "posts": 0, "bytes": 0, "missing": [],
                   "relays_discovered": 0, "seeders": 0}
 
+        # Per-site transport: route this site's pulls over Tor when the site (or
+        # the node default) selects it. `proxy` is None for a direct connection.
+        proxy = self.transport.proxy_url(getattr(site, "transport", None))
+
         # NIP-65 discovery: where does this author publish? Add their outbox
-        # relays to whatever the operator configured.
-        discovered = await discover_relays(site.pubkey, self.source_relays, want="write")
+        # relays to whatever the operator configured. Discovered relays are
+        # network-supplied, so they pass through the SSRF guard; the operator's
+        # own `source_relays` are trusted and exempt.
+        discovered = await discover_relays(site.pubkey, self.source_relays, want="write", proxy=proxy)
+        discovered = filter_safe(discovered, self.allow_private)
         report["relays_discovered"] = len(discovered)
         relays = list(dict.fromkeys(self.source_relays + discovered))
 
@@ -113,12 +130,15 @@ class ReplicationController:
         # pull the manifest and blobs from — resilience when the author is gone.
         site_kind = KIND_NAMED if site.identifier else KIND_ROOT
         coord = site_coord(site_kind, site.pubkey, site.identifier)
-        seeders = await discover_seeders(coord, relays)
+        seeders = await discover_seeders(coord, relays, proxy=proxy)
         report["seeders"] = len(seeders)
         seeder_servers, seeder_relays = [], []
         for s in seeders:
             seeder_servers += s["servers"]
             seeder_relays += s["relays"]
+        # All seeder-supplied URLs are untrusted network input → guard them.
+        seeder_servers = filter_safe(seeder_servers, self.allow_private)
+        seeder_relays = filter_safe(seeder_relays, self.allow_private)
         relays = list(dict.fromkeys(relays + seeder_relays))
 
         if site.identifier:
@@ -126,7 +146,7 @@ class ReplicationController:
                    "#d": [site.identifier], "limit": 1}]
         else:
             mf = [{"authors": [site.pubkey], "kinds": [KIND_ROOT, KIND_LEGACY], "limit": 1}]
-        manifest_event = await self._pull_newest(mf, relays)
+        manifest_event = await self._pull_newest(mf, relays, proxy=proxy)
         if manifest_event is None or manifest_event.pubkey != site.pubkey:
             report["manifest"] = "not found"
             return report
@@ -134,13 +154,16 @@ class ReplicationController:
         self.store.store(manifest_event)            # already verified in _pull_newest
         report["manifest"] = manifest_event.id
         manifest = parse_manifest(manifest_event)
+        # Manifest `server` hints are author/network-supplied → guard them; the
+        # operator's own `default_blossom` is trusted and appended unfiltered.
+        manifest_servers = filter_safe(manifest.get("servers") or [], self.allow_private)
         sources = list(dict.fromkeys(
-            (manifest.get("servers") or []) + seeder_servers + self.default_blossom))
+            manifest_servers + seeder_servers + self.default_blossom))
 
         # A blog's content is in events, not blobs: mirror the posts too.
         if manifest.get("app") == "blog":
             for post in await self._pull_all([{"authors": [site.pubkey],
-                                               "kinds": [KIND_LONGFORM]}], relays):
+                                               "kinds": [KIND_LONGFORM]}], relays, proxy=proxy):
                 self.store.store(post)
                 report["posts"] += 1
 
@@ -148,7 +171,7 @@ class ReplicationController:
             if self.blob_store.has(sha):
                 report["files_present"] += 1
                 continue
-            size = await self._blob_size(sha, sources)
+            size = await self._blob_size(sha, sources, proxy=proxy)
             if not site.pin and self.storage_total and size and \
                     self._node_bytes + size > self.storage_total:
                 report["files_skipped"] += 1
@@ -160,7 +183,7 @@ class ReplicationController:
             if self.meter is not None and size and not self.meter.allow(size):
                 report["files_skipped"] += 1
                 continue  # bandwidth budget reached (applies even to pinned sites)
-            data = await self._fetch_blob(sha, sources)
+            data = await self._fetch_blob(sha, sources, proxy=proxy)
             if data is None:
                 report["missing"].append(sha[:12])
                 continue
